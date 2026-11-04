@@ -1,0 +1,146 @@
+name: Release macOS app
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '版本标签，必须与 VERSION 一致（例如 v0.22.0）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Test, package and publish
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release version and source
+        id: version
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, subprocess
+          version = pathlib.Path('VERSION').read_text().strip()
+          if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version):
+              raise SystemExit('VERSION must contain a stable x.y.z version')
+          if os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch':
+              if os.environ['GITHUB_REF'] != 'refs/heads/' + os.environ['DEFAULT_BRANCH']:
+                  raise SystemExit('Manual releases must run from the default branch')
+              tag = os.environ['REQUESTED_TAG']
+          else:
+              tag = os.environ['GITHUB_REF_NAME']
+          if tag != 'v' + version:
+              raise SystemExit('Release tag must equal v' + version)
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          existing = subprocess.run(['git', 'rev-parse', '--verify', 'refs/tags/' + tag + '^{commit}'], capture_output=True, text=True)
+          if existing.returncode == 0 and existing.stdout.strip() != head:
+              raise SystemExit('Existing tag points to a different commit; use a new version')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\ntag={tag}\ncommit={head}\n')
+          PY
+          test "$(uname -m)" = arm64
+          xcrun swift --version
+
+      - name: Refuse to replace an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > "$RUNNER_TEMP/release-tags.txt"
+          if grep -Fxq -- "$RELEASE_TAG" "$RUNNER_TEMP/release-tags.txt"; then
+            echo 'This version already has a release. Choose a new version; published files are never overwritten.' >&2
+            exit 1
+          fi
+
+      - name: Run tests
+        run: |
+          bash scripts/test-release-metadata.sh
+          bash scripts/test.sh
+
+      - name: Build and package
+        run: bash scripts/package-release.sh
+
+      - name: Retain packaged files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: WorkJournal-${{ steps.version.outputs.version }}-macOS-arm64
+          path: |
+            dist/release/WorkJournal-${{ steps.version.outputs.version }}-macOS-arm64.zip
+            dist/release/WorkJournal-${{ steps.version.outputs.version }}-macOS-arm64.dmg
+            dist/release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Publish release after all checks pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_COMMIT: ${{ steps.version.outputs.commit }}
+        run: |
+          # Fail closed on API/network errors and recheck after the build.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > "$RUNNER_TEMP/release-tags.txt"
+          if grep -Fxq -- "$RELEASE_TAG" "$RUNNER_TEMP/release-tags.txt"; then
+            echo 'A release for this version already exists; refusing to replace it.' >&2
+            exit 1
+          fi
+          read_remote_tag() {
+            git ls-remote --tags origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" > "$RUNNER_TEMP/tag-refs.txt"
+          }
+          verify_remote_tag() {
+            read_remote_tag
+            python3 - "$RUNNER_TEMP/tag-refs.txt" "$RELEASE_TAG" "$RELEASE_COMMIT" <<'PY'
+          import pathlib, sys
+          refs = {ref: sha for sha, ref in (line.split() for line in pathlib.Path(sys.argv[1]).read_text().splitlines())}
+          key = 'refs/tags/' + sys.argv[2]
+          actual = refs.get(key + '^{}', refs.get(key))
+          if actual != sys.argv[3]:
+              raise SystemExit('Remote tag changed or is missing; refusing to publish mismatched source')
+          PY
+          }
+          read_remote_tag
+          if [[ ! -s "$RUNNER_TEMP/tag-refs.txt" ]]; then
+            # Atomically reserve the exact source commit. A concurrent tag creation fails safely.
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$RELEASE_COMMIT" >/dev/null
+          fi
+          verify_remote_tag
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          ## 下载与安装
+          - 适用于 Apple 芯片（M 系列）Mac，macOS 14 或更新系统。
+          - 下载 `.dmg`，打开后把 WorkJournal 拖到 Applications；也可下载 `.zip` 解压。
+          - 应用采用 ad-hoc 签名，尚未配置 Apple Developer ID 签名和公证；首次打开可能被 macOS Gatekeeper 拦截。请自行确认来源，仅在信任后按系统提示处理。
+          - 更新前建议在设置中导出备份；安装包不包含工作记录、用户图片或本地模型。
+          - Ollama 与模型需单独安装。没有模型仍可记录、搜索和手动管理内容。
+
+          ## 完整性校验
+          同时下载 `SHA256SUMS.txt`，在文件所在目录运行 `shasum -a 256 -c SHA256SUMS.txt`。
+          NOTES
+          printf '\n构建源码：`%s`\n' "$RELEASE_COMMIT" >> "$RUNNER_TEMP/release-notes.md"
+          gh release create "$RELEASE_TAG" \
+            "dist/release/WorkJournal-${RELEASE_VERSION}-macOS-arm64.zip" \
+            "dist/release/WorkJournal-${RELEASE_VERSION}-macOS-arm64.dmg" \
+            dist/release/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "工作随记 $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md" --draft
+          verify_remote_tag
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

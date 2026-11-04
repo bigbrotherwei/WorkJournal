@@ -2,6 +2,14 @@
 
 一个在 Mac 本地使用的工作记录、待办跟进与日报工具。原生 SwiftUI / AppKit 界面，SQLite 保存数据，通过本机 Ollama 整理文字。
 
+## 下载与安装
+
+从 [GitHub Releases](https://github.com/bigbrotherwei/WorkJournal/releases/latest) 下载最新版本。当前提供 **Apple 芯片（M 系列）Mac、macOS 14+** 的 `.dmg` 与 `.zip` 安装包；Intel Mac 暂无预构建包。
+
+打开 `.dmg` 后，将 WorkJournal 拖到 Applications；或解压 `.zip` 后将应用移入“应用程序”。安装包不含 Ollama 和模型，需要单独安装。
+
+当前采用 ad-hoc 签名，尚未配置 Apple Developer ID 签名和公证，首次打开可能被 macOS Gatekeeper 拦截。请核实下载来源，仅在信任后按系统提示处理。更新前建议先在应用设置中导出备份。
+
 ## 功能
 
 - **随手记录**：全局快捷键打开记录窗口；自动记录日期，支持补记、单一分类、关键词搜索和跟进状态。
@@ -52,6 +60,26 @@ open dist/WorkJournal.app
 ```
 
 构建结果采用本机 ad-hoc 签名，尚未做面向其他 Mac 分发的 Apple 公证。构建脚本兼容命令行工具环境；测试脚本按需加载 Swift Testing 宏。
+
+### 自动发布 Releases
+
+版本号来自根目录的 `VERSION`，构建编号来自 `BUILD_NUMBER`。发布前更新这两个文件并提交到公开仓库，再选择一种触发方式：
+
+- **标签触发**：在公开仓库推送与 `VERSION` 完全一致的标签，例如 `v0.22.0`。
+- **页面手动触发**：进入 [Actions → Release macOS app](https://github.com/bigbrotherwei/WorkJournal/actions/workflows/release.yml)，点击 **Run workflow**，选择默认分支，填写对应版本标签。标签不存在时，会在通过验证的提交上创建。
+
+流程会先运行测试，再生成 `.app`、ZIP、带 Applications 快捷方式的 DMG 和 `SHA256SUMS.txt`。所有文件上传完成后才会公开 Release；版本与标签不匹配、已有标签指向其他提交或版本已经发布时会停止，避免覆盖旧版本。安装包也会作为 Actions 构建产物保留 7 天。
+
+如果上传中断并留下草稿 Release，请先检查并处理草稿，再重试；流程不会覆盖已有 Release。不要把包含私人开发日志的本地提交历史推送到公开仓库，应只同步审核过的源码变更。
+
+在 Apple 芯片 Mac 上手动生成相同格式的安装包：
+
+```sh
+bash scripts/package-release.sh
+# 输出位于 dist/release/
+cd dist/release
+shasum -a 256 -c SHA256SUMS.txt
+```
 
 ## 开始使用
 
