@@ -1,0 +1,12 @@
+.build/
+dist/
+.DS_Store
+.swiftpm/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+Backups/
+.env
+.env.*
+*.p12
+*.pem
