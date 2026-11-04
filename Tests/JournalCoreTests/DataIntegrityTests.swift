@@ -21,7 +21,7 @@ struct DataIntegrityTests {
         let json = try #require(JSONSerialization.jsonObject(with: store.exportBackup()) as? [String: Any])
         #expect((json["entries"] as? [Any])?.count == 1)
         #expect((json["reports"] as? [Any])?.count == 2)
-        #expect(json["formatVersion"] as? Int == 3)
+        #expect(json["formatVersion"] as? Int == 4)
     }
     @Test func duplicateReportIDCannotOverwrite() throws {
         let store = try store()

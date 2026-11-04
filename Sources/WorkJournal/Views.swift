@@ -67,7 +67,7 @@ struct CaptureView: View {
                     Spacer()
                     Text("日报默认不勾选").font(.caption).foregroundStyle(.secondary)
                 }
-                DueControls(optionalDate: $app.draftDueAt, reminderEnabled: $app.draftReminderEnabled, followUp: $app.draftStatus, status: reminders.status)
+                DueControls(optionalDate: $app.draftDueAt, reminderEnabled: $app.draftReminderEnabled, followUp: $app.draftStatus, recurrence: $app.draftRecurrence, status: reminders.status)
             }.padding(14).background(JournalTheme.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
@@ -303,7 +303,12 @@ struct EntryEditor: View {
                 .font(.caption).foregroundStyle(.secondary)
             Toggle("计入日报", isOn: $entry.inReport)
             Picker("跟进状态", selection: $entry.status) { ForEach(FollowUp.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
-            DueControls(optionalDate: $entry.dueAt, reminderEnabled: $entry.reminderEnabled, followUp: $entry.status, status: reminders.status)
+            DueControls(optionalDate: $entry.dueAt, reminderEnabled: $entry.reminderEnabled, followUp: $entry.status, recurrence: $entry.recurrence, status: reminders.status)
+            if let snoozed = entry.snoozedUntil, entry.status == .pending && entry.reminderEnabled {
+                Label("已延后至 " + snoozed.formatted(date: .abbreviated, time: .shortened), systemImage: "bell.badge")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("取消稍后提醒") { entry.snoozedUntil = nil }
+            }
             HStack { Button("取消") { dismiss() }; Spacer(); Button("保存") {
                 if app.saveEdited(original: original, edited: entry) { dismiss() }
             }.buttonStyle(JournalPrimaryButtonStyle()) }

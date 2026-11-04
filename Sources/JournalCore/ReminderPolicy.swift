@@ -11,11 +11,12 @@ public enum ReminderPolicy {
         entry.deletedAt == nil && entry.status == .pending && entry.reminderEnabled && entry.dueAt != nil
     }
     public static func notificationBody(for entry: Entry) -> String { String(entry.plainText.prefix(160)) }
+    public static func scheduledDate(for entry: Entry) -> Date? { entry.snoozedUntil ?? entry.dueAt }
     public static func matchesPending(_ entry: Entry, dueTimestamp: TimeInterval?, body: String) -> Bool {
-        isActive(entry) && entry.dueAt?.timeIntervalSince1970 == dueTimestamp && notificationBody(for: entry) == body
+        isActive(entry) && scheduledDate(for: entry)?.timeIntervalSince1970 == dueTimestamp && notificationBody(for: entry) == body
     }
     public static func shouldSchedule(_ entry: Entry, now: Date = Date()) -> Bool {
-        isActive(entry) && entry.dueAt! > now
+        isActive(entry) && scheduledDate(for: entry)! > now
     }
     public static func group(for entry: Entry, now: Date = Date(), calendar: Calendar = .current) -> TaskDueGroup {
         guard let due = entry.dueAt else { return .noDate }

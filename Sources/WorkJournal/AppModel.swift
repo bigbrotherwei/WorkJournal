@@ -7,6 +7,9 @@ import JournalCore
     @Published var trash: [Entry] = []
     @Published var navigationTarget: String?
     let reminders = ReminderCoordinator()
+    @Published var draftRecurrence = TaskRecurrence(rawValue: UserDefaults.standard.string(forKey: "draftRecurrence") ?? "") ?? .none {
+        didSet { UserDefaults.standard.set(draftRecurrence.rawValue, forKey: "draftRecurrence") }
+    }
     @Published var draftDueAt = UserDefaults.standard.object(forKey: "draftDueAt") as? Date {
         didSet { UserDefaults.standard.set(draftDueAt, forKey: "draftDueAt") }
     }
@@ -159,13 +162,27 @@ import JournalCore
     func saveDraft() -> Bool {
         var entry = Entry(text: draft, day: Days.key(draftDate))
         entry.inReport = draftInReport; entry.status = draftStatus; entry.images = draftImages
-        entry.dueAt = draftDueAt; entry.reminderEnabled = draftReminderEnabled
+        entry.dueAt = draftDueAt; entry.reminderEnabled = draftReminderEnabled; entry.recurrence = draftRecurrence
         guard save(entry) else { return false }
         do { try draftImageStore?.save(RecordDraft()); draftImages = [] }
         catch { self.error = "记录已保存，但图片草稿清理失败：" + error.localizedDescription; return false }
-        draft = ""; draftDateManual = false; draftDate = Date(); draftInReport = false; draftStatus = .none; draftDueAt = nil; draftReminderEnabled = false
+        draft = ""; draftDateManual = false; draftDate = Date(); draftInReport = false; draftStatus = .none; draftDueAt = nil; draftReminderEnabled = false; draftRecurrence = .none
         notice = "已保存 · \(entry.day)"
         return true
+    }
+    func snooze(_ id: UUID, until date: Date, expectedTimestamp: TimeInterval? = nil) {
+        do {
+            if let expectedTimestamp {
+                guard let current = entries.first(where: { $0.id == id }),
+                      ReminderPolicy.isActive(current),
+                      ReminderPolicy.scheduledDate(for: current)?.timeIntervalSince1970 == expectedTimestamp else {
+                    notice = "这条提醒已变化，请在待办中查看最新状态。"; return
+                }
+            }
+            try database().snooze(id: id, until: date); try reload()
+            notice = "将在 " + date.formatted(date: .abbreviated, time: .shortened) + " 提醒，截止时间不变"
+            Task { await reminders.requestAuthorization() }
+        } catch { self.error = error.localizedDescription }
     }
     func delete(_ entry: Entry) {
         do { try database().delete(id: entry.id); deleted = entry; try reload(); notice = "已移入回收站，可恢复" }
@@ -353,7 +370,7 @@ import JournalCore
             let data = try Data(contentsOf: url)
             let alert = NSAlert()
             alert.messageText = "合并此备份到本机？"
-            alert.informativeText = "只补回缺失记录和日报版本，不覆盖本机同 ID 内容。导入前会自动保存一份本机备份。"
+            alert.informativeText = "只补回缺失记录和日报版本，不覆盖本机同 ID 内容；同一重复待办系列保留本机版本，避免重复。导入前会自动保存一份本机备份。"
             alert.addButton(withTitle: "合并导入"); alert.addButton(withTitle: "取消")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
             let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)

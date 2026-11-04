@@ -35,6 +35,10 @@ import JournalCore
         statusMenu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         status.menu = statusMenu; statusItem = status
         model.reminders.onOpenEntry = { [weak self] _ in self?.model.navigationTarget = "待办"; self?.showMain() }
+        model.reminders.onSnoozeEntry = { [weak self] id, choice, timestamp in
+            self?.model.snooze(id, until: choice.date(), expectedTimestamp: timestamp)
+            self?.model.navigationTarget = "待办"; self?.showMain()
+        }
         powerMonitor.start(); installShortcut(); showMain()
     }
     @objc func showMain() {

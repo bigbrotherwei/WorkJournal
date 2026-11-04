@@ -15,12 +15,19 @@ public struct Entry: Identifiable, Codable, Equatable, Sendable {
     public var manualCategory = false
     public var dueAt: Date?
     public var reminderEnabled = false
+    public var recurrence: TaskRecurrence = .none
+    public var recurrenceDayOfMonth: Int?
+    public var recurrenceClock: RecurrenceClock?
+    public var recurrenceSeriesID: UUID?
+    public var snoozedUntil: Date?
+    public var nextOccurrenceID: UUID?
     public var deletedAt: Date?
     public var images: [ImageAttachment] = []
     public var plainText: String { RecordContent.plainText(text) }
     public var hasContent: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty }
     private enum CodingKeys: String, CodingKey {
         case id, text, day, createdAt, updatedAt, inReport, status, category, manualCategory, images, dueAt, reminderEnabled, deletedAt
+        case recurrence, recurrenceDayOfMonth, recurrenceClock, recurrenceSeriesID, snoozedUntil, nextOccurrenceID
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -31,6 +38,12 @@ public struct Entry: Identifiable, Codable, Equatable, Sendable {
         category = try c.decode(String.self, forKey: .category); manualCategory = try c.decode(Bool.self, forKey: .manualCategory)
         dueAt = try c.decodeIfPresent(Date.self, forKey: .dueAt)
         reminderEnabled = try c.decodeIfPresent(Bool.self, forKey: .reminderEnabled) ?? false
+        recurrence = try c.decodeIfPresent(TaskRecurrence.self, forKey: .recurrence) ?? .none
+        recurrenceDayOfMonth = try c.decodeIfPresent(Int.self, forKey: .recurrenceDayOfMonth)
+        recurrenceClock = try c.decodeIfPresent(RecurrenceClock.self, forKey: .recurrenceClock)
+        recurrenceSeriesID = try c.decodeIfPresent(UUID.self, forKey: .recurrenceSeriesID)
+        snoozedUntil = try c.decodeIfPresent(Date.self, forKey: .snoozedUntil)
+        nextOccurrenceID = try c.decodeIfPresent(UUID.self, forKey: .nextOccurrenceID)
         deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
         images = try c.decodeIfPresent([ImageAttachment].self, forKey: .images) ?? []
     }

@@ -9,7 +9,7 @@ enum ReminderAuthorizationStatus: Equatable {
         switch self {
         case .unknown: return "正在检查通知权限"
         case .notDetermined: return "保存启用提醒的记录时，将请求通知权限"
-        case .authorized: return "已允许通知，将在截止时间提醒"
+        case .authorized: return "已允许通知，将在设定时间提醒"
         case .denied: return "通知未获允许，记录仍会保存；可在系统设置 → 通知中允许工作随记"
         case .unavailable: return "当前无法使用通知，记录仍会保存"
         }
@@ -22,6 +22,7 @@ enum ReminderAuthorizationStatus: Equatable {
     @Published private(set) var testFeedback: String?
     @Published private(set) var sendingTest = false
     var onOpenEntry: ((UUID) -> Void)?
+    var onSnoozeEntry: ((UUID, SnoozeChoice, TimeInterval?) -> Void)?
     private var latestEntries: [Entry] = []
     private var revision = 0
     private var processing = false
@@ -35,6 +36,10 @@ enum ReminderAuthorizationStatus: Equatable {
     override init() {
         super.init()
         center?.delegate = self
+        let actions = SnoozeChoice.allCases.map {
+            UNNotificationAction(identifier: "snooze." + $0.rawValue, title: $0.label, options: [.foreground])
+        }
+        center?.setNotificationCategories([UNNotificationCategory(identifier: "workjournal.followup", actions: actions, intentIdentifiers: [], options: [])])
         Task { await refreshAuthorization() }
     }
     func refreshAuthorization() async {
@@ -120,22 +125,28 @@ enum ReminderAuthorizationStatus: Equatable {
             let preserved = Set(own.filter { request in
                 guard let entry = byIdentifier[request.identifier] else { return false }
                 let timestamp = (request.content.userInfo["dueTimestamp"] as? NSNumber)?.doubleValue
-                return ReminderPolicy.matchesPending(entry, dueTimestamp: timestamp, body: request.content.body)
+                return request.content.categoryIdentifier == "workjournal.followup" && ReminderPolicy.matchesPending(entry, dueTimestamp: timestamp, body: request.content.body)
             }.map(\.identifier))
             center.removePendingNotificationRequests(withIdentifiers: own.map(\.identifier).filter { !preserved.contains($0) })
-            center.removeDeliveredNotifications(withIdentifiers: delivered.map { $0.request.identifier }.filter {
-                $0.hasPrefix(ReminderPolicy.identifierPrefix) && byIdentifier[$0] == nil
-            })
+            center.removeDeliveredNotifications(withIdentifiers: delivered.filter {
+                let request = $0.request
+                guard request.identifier.hasPrefix(ReminderPolicy.identifierPrefix) else { return false }
+                guard let entry = byIdentifier[request.identifier] else { return true }
+                return !ReminderPolicy.matchesPending(entry,
+                    dueTimestamp: (request.content.userInfo["dueTimestamp"] as? NSNumber)?.doubleValue,
+                    body: request.content.body)
+            }.map { $0.request.identifier })
             schedulingError = nil
             if status == .authorized {
                 for entry in entries where ReminderPolicy.shouldSchedule(entry) && !preserved.contains(ReminderPolicy.identifier(for: entry.id)) {
                     guard version == revision else { break }
                     let content = UNMutableNotificationContent()
-                    content.title = "待处理事项到期"
+                    content.title = entry.snoozedUntil == nil ? "待处理事项到期" : "待处理事项 · 稍后提醒"
+                    content.categoryIdentifier = "workjournal.followup"
                     content.body = ReminderPolicy.notificationBody(for: entry)
                     content.sound = .default
-                    content.userInfo = ["entryID": entry.id.uuidString, "dueTimestamp": entry.dueAt!.timeIntervalSince1970]
-                    guard let due = entry.dueAt, due > Date() else { continue }
+                    content.userInfo = ["entryID": entry.id.uuidString, "dueTimestamp": ReminderPolicy.scheduledDate(for: entry)!.timeIntervalSince1970]
+                    guard let due = ReminderPolicy.scheduledDate(for: entry), due > Date() else { continue }
                     let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(1, due.timeIntervalSinceNow), repeats: false)
                     do { try await center.add(UNNotificationRequest(identifier: ReminderPolicy.identifier(for: entry.id), content: content, trigger: trigger)) }
                     catch { schedulingError = "提醒未能安排：" + error.localizedDescription }
@@ -146,17 +157,30 @@ enum ReminderAuthorizationStatus: Equatable {
     }
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
         let value = response.notification.request.content.userInfo["entryID"] as? String
+        let action = response.actionIdentifier
+        let timestamp = (response.notification.request.content.userInfo["dueTimestamp"] as? NSNumber)?.doubleValue
         Task { @MainActor [weak self] in
-            if let value, let id = UUID(uuidString: value) { self?.onOpenEntry?(id) }
+            defer { completionHandler() }
+            guard let value, let id = UUID(uuidString: value) else { return }
+            if action.hasPrefix("snooze."), let choice = SnoozeChoice(rawValue: String(action.dropFirst(7))) {
+                self?.onSnoozeEntry?(id, choice, timestamp)
+            } else if action == UNNotificationDefaultActionIdentifier { self?.onOpenEntry?(id) }
         }
-        completionHandler()
     }
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        if notification.request.identifier == "workjournal.notification-test" {
-            Task { @MainActor [weak self] in
-                self?.testFeedback = "系统已投递测试通知（可在通知中心查看）"
+        let request = notification.request
+        Task { @MainActor [weak self] in
+            guard let self else { completionHandler([]); return }
+            if request.identifier == "workjournal.notification-test" {
+                self.testFeedback = "系统已投递测试通知（可在通知中心查看）"
+                completionHandler([.banner, .sound]); return
             }
+            let timestamp = (request.content.userInfo["dueTimestamp"] as? NSNumber)?.doubleValue
+            let valid = self.latestEntries.contains {
+                ReminderPolicy.identifier(for: $0.id) == request.identifier
+                    && ReminderPolicy.matchesPending($0, dueTimestamp: timestamp, body: request.content.body)
+            }
+            completionHandler(valid ? [.banner, .sound] : [])
         }
-        completionHandler([.banner, .sound])
     }
 }

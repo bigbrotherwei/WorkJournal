@@ -38,8 +38,8 @@ public final class JournalStore {
     }
     private func migrateIfNeeded(url: URL) throws {
         let version = try scalar("PRAGMA user_version")
-        guard version <= 3 else { throw JournalError.invalid("数据库由更新版本应用创建，请使用更新的工作随记打开；未修改数据。") }
-        if version == 3 { try checkTables(includeSummaries: true); return }
+        guard version <= 4 else { throw JournalError.invalid("数据库由更新版本应用创建，请使用更新的工作随记打开；未修改数据。") }
+        if version == 4 { try checkTables(includeSummaries: true); return }
         let tables = try scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
         if tables > 0 {
             guard tables == 2 || tables == 3 else { throw JournalError.invalid("无法识别旧数据库结构，已停止升级。") }
@@ -55,13 +55,13 @@ public final class JournalStore {
         }
         try transaction {
             let current = try scalar("PRAGMA user_version")
-            guard current <= 3 else { throw JournalError.invalid("数据库版本已变化，停止升级，请重新打开应用。") }
-            if current == 3 { try checkTables(includeSummaries: true); return }
+            guard current <= 4 else { throw JournalError.invalid("数据库版本已变化，停止升级，请重新打开应用。") }
+            if current == 4 { try checkTables(includeSummaries: true); return }
             try execute("CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             try execute("CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             try execute("CREATE TABLE IF NOT EXISTS range_summaries (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             try checkTables(includeSummaries: true)
-            try execute("PRAGMA user_version=3")
+            try execute("PRAGMA user_version=4")
         }
     }
     private func snapshot(to url: URL) throws {
@@ -112,9 +112,62 @@ public final class JournalStore {
     private func payload<T: Encodable>(_ value: T) throws -> String {
         String(decoding: try encoder.encode(value), as: UTF8.self)
     }
-    public func save(_ entry: Entry) throws {
+    public func save(_ proposed: Entry, now: Date = Date(), calendar: Calendar = .current) throws {
+        try transaction {
+            let current = try read("entries", as: Entry.self).first { $0.id == proposed.id }
+            var entry = proposed
+            if let current {
+                entry.nextOccurrenceID = current.nextOccurrenceID
+                entry.recurrenceSeriesID = current.recurrenceSeriesID
+                if current.nextOccurrenceID != nil && entry.status != .done {
+                    throw JournalError.invalid("这期事项已生成下一期待办，请在待办列表修改下一期。")
+                }
+                if current.dueAt != entry.dueAt { entry.snoozedUntil = nil }
+                if current.dueAt != entry.dueAt || current.recurrence != entry.recurrence {
+                    entry.recurrenceDayOfMonth = nil; entry.recurrenceClock = nil
+                }
+            }
+            if entry.recurrence != .none && entry.recurrenceSeriesID == nil { entry.recurrenceSeriesID = entry.id }
+            if entry.status != .pending || !entry.reminderEnabled || entry.dueAt == nil { entry.snoozedUntil = nil }
+            if entry.recurrence != .none, entry.recurrenceClock == nil, let due = entry.dueAt {
+                entry.recurrenceClock = RecurrenceClock(date: due, calendar: calendar)
+            } else if entry.recurrence == .none { entry.recurrenceClock = nil }
+            if entry.recurrence == .monthly, entry.recurrenceDayOfMonth == nil, let due = entry.dueAt {
+                entry.recurrenceDayOfMonth = calendar.component(.day, from: due)
+            } else if entry.recurrence != .monthly { entry.recurrenceDayOfMonth = nil }
+            if let current, current.deletedAt == nil, entry.deletedAt == nil,
+               current.status == .pending, entry.status == .done,
+               entry.recurrence != .none, entry.nextOccurrenceID == nil {
+                let nextDue = try RecurringTasks.nextDeadline(for: entry, after: now, calendar: calendar)
+                var next = Entry(text: entry.text, day: Days.key(nextDue))
+                next.createdAt = now; next.updatedAt = now
+                next.status = .pending; next.dueAt = nextDue
+                next.reminderEnabled = entry.reminderEnabled
+                next.recurrence = entry.recurrence; next.recurrenceDayOfMonth = entry.recurrenceDayOfMonth; next.recurrenceClock = entry.recurrenceClock
+                next.recurrenceSeriesID = entry.recurrenceSeriesID
+                next.category = entry.category; next.manualCategory = entry.manualCategory; next.images = entry.images
+                entry.nextOccurrenceID = next.id
+                try persist(next)
+            }
+            try persist(entry)
+        }
+    }
+    public func snooze(id: UUID, until date: Date, now: Date = Date()) throws {
+        try transaction {
+            guard var entry = try entries().first(where: { $0.id == id }), entry.status == .pending, entry.dueAt != nil else {
+                throw JournalError.invalid("只有设置截止时间的待处理事项可以稍后提醒。")
+            }
+            guard date > now, date.timeIntervalSinceReferenceDate.isFinite else {
+                throw JournalError.invalid("请选择未来的提醒时间。")
+            }
+            entry.snoozedUntil = date; entry.reminderEnabled = true; entry.updatedAt = now
+            try persist(entry)
+        }
+    }
+    private func persist(_ entry: Entry) throws {
         guard entry.hasContent else { throw JournalError.invalid("请输入文字或添加图片") }
         try RecordContent.validate(text: entry.text, images: entry.images)
+        try RecurringTasks.validate(entry)
         try validateDay(entry.day)
         try execute("INSERT INTO entries(id,payload) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", values: [entry.id.uuidString, try payload(entry)])
     }
@@ -132,7 +185,7 @@ public final class JournalStore {
     }
     public func importBackup(_ data: Data) throws -> ImportResult {
         let backup = try decoder.decode(Backup.self, from: data)
-        guard [1, 2, 3].contains(backup.formatVersion) else { throw JournalError.invalid("备份版本不受支持，未修改本机数据。") }
+        guard [1, 2, 3, 4].contains(backup.formatVersion) else { throw JournalError.invalid("备份版本不受支持，未修改本机数据。") }
         guard Set(backup.entries.map(\.id)).count == backup.entries.count,
               Set(backup.reports.map(\.id)).count == backup.reports.count,
               Set((backup.summaries ?? []).map(\.id)).count == (backup.summaries ?? []).count else {
@@ -142,6 +195,7 @@ public final class JournalStore {
         for entry in backup.entries {
             try validateDay(entry.day)
             try RecordContent.validate(text: entry.text, images: entry.images)
+            try RecurringTasks.validate(entry)
             guard entry.hasContent,
                   !entry.category.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw JournalError.invalid("备份包含空白记录或分类。")
@@ -153,12 +207,30 @@ public final class JournalStore {
         }
         for summary in backup.summaries ?? [] { try validateSummary(summary) }
         return try transaction {
-            let entryIDs = Set(try read("entries", as: Entry.self).map(\.id))
+            let existing = try read("entries", as: Entry.self)
+            let entryIDs = Set(existing.map(\.id))
+            let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+            let incomingByID = Dictionary(uniqueKeysWithValues: backup.entries.map { ($0.id, $0) })
+            // A series is one logical task. Local history/trash also claims it, so an older
+            // backup cannot resurrect a completed series or fork it after an ancestor was erased.
+            let localSeries = Set(existing.compactMap(\.recurrenceSeriesID))
+            var skippedDescendants: Set<UUID> = []
+            // Preserve local rows, and also skip incoming successors that would fork their chain.
+            for incoming in backup.entries {
+                guard let local = existingByID[incoming.id], local.nextOccurrenceID != incoming.nextOccurrenceID else { continue }
+                var cursor = incoming.nextOccurrenceID
+                var visited: Set<UUID> = []
+                while let id = cursor, visited.insert(id).inserted {
+                    if !entryIDs.contains(id) { skippedDescendants.insert(id) }
+                    cursor = incomingByID[id]?.nextOccurrenceID
+                }
+            }
             let reportIDs = Set(try read("reports", as: Report.self).map(\.id))
             var result = ImportResult(entries: 0, reports: 0, skipped: 0)
             for entry in backup.entries {
-                if entryIDs.contains(entry.id) { result.skipped += 1 }
-                else { try save(entry); result.entries += 1 }
+                if entryIDs.contains(entry.id) || skippedDescendants.contains(entry.id)
+                    || entry.recurrenceSeriesID.map({ localSeries.contains($0) }) == true { result.skipped += 1 }
+                else { try persist(entry); result.entries += 1 }
             }
             for report in backup.reports {
                 if reportIDs.contains(report.id) { result.skipped += 1 }
@@ -182,7 +254,7 @@ public final class JournalStore {
             let affected = try entries().filter { $0.category == source }
             for var entry in affected {
                 entry.category = target; entry.manualCategory = true; entry.updatedAt = Date()
-                try save(entry)
+                try persist(entry)
             }
             return affected.count
         }
@@ -196,7 +268,7 @@ public final class JournalStore {
         } catch { try? execute("ROLLBACK"); throw error }
     }
     public func exportBackup() throws -> Data {
-        let value = Backup(formatVersion: 3, entries: try read("entries", as: Entry.self), reports: try read("reports", as: Report.self), summaries: try read("range_summaries", as: RangeSummary.self))
+        let value = Backup(formatVersion: 4, entries: try read("entries", as: Entry.self), reports: try read("reports", as: Report.self), summaries: try read("range_summaries", as: RangeSummary.self))
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try encoder.encode(value)
     }
@@ -209,13 +281,13 @@ public final class JournalStore {
     public func delete(id: UUID) throws {
         try transaction {
             guard var entry = try entries().first(where: { $0.id == id }) else { return }
-            entry.deletedAt = Date(); entry.updatedAt = Date(); try save(entry)
+            entry.deletedAt = Date(); entry.updatedAt = Date(); try persist(entry)
         }
     }
     public func restore(id: UUID) throws {
         try transaction {
             guard var entry = try trashedEntries().first(where: { $0.id == id }) else { return }
-            entry.deletedAt = nil; entry.updatedAt = Date(); try save(entry)
+            entry.deletedAt = nil; entry.updatedAt = Date(); try persist(entry)
         }
     }
     public func permanentlyDelete(id: UUID) throws {

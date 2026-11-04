@@ -11,6 +11,8 @@ public enum EntryEditing {
         if edited.images != original.images { result.images = edited.images }
         if edited.dueAt != original.dueAt { result.dueAt = edited.dueAt }
         if edited.reminderEnabled != original.reminderEnabled { result.reminderEnabled = edited.reminderEnabled }
+        if edited.recurrence != original.recurrence { result.recurrence = edited.recurrence }
+        if edited.snoozedUntil != original.snoozedUntil { result.snoozedUntil = edited.snoozedUntil }
         if edited.day != original.day { result.day = edited.day }
         if edited.inReport != original.inReport { result.inReport = edited.inReport }
         if edited.status != original.status { result.status = edited.status }
