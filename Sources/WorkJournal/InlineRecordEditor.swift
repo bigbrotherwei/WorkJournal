@@ -125,12 +125,15 @@ struct NativeRecordEditor: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.drawsBackground = false
-        let editor = InlineTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 150))
+        // Match the initial clip size. Starting a 400-point document in a zero-width
+        // scroll view can add those 400 points again when SwiftUI sizes the view.
+        let viewport = scroll.contentSize
+        let editor = InlineTextView(frame: NSRect(origin: .zero, size: viewport))
         editor.isRichText = true; editor.importsGraphics = false; editor.allowsUndo = true
         editor.drawsBackground = false; editor.font = .systemFont(ofSize: 15)
         editor.textColor = .labelColor; editor.isVerticallyResizable = true; editor.isHorizontallyResizable = false
         editor.autoresizingMask = [.width]; editor.textContainer?.widthTracksTextView = true
-        editor.textContainer?.containerSize = NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude)
+        editor.textContainer?.containerSize = NSSize(width: viewport.width, height: CGFloat.greatestFiniteMagnitude)
         editor.setAccessibilityLabel("记录内容，支持图文混排")
         editor.delegate = context.coordinator; editor.bridge = bridge; bridge.editor = editor
         scroll.documentView = editor
