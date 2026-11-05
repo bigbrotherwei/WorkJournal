@@ -306,9 +306,12 @@ public final class JournalStore {
         try validateSummary(summary)
         try execute("INSERT INTO range_summaries(id,payload) VALUES(?,?)", values: [summary.id.uuidString, try payload(summary)])
     }
-    public func summaries(startDay: String, endDay: String) throws -> [RangeSummary] {
-        try read("range_summaries", as: RangeSummary.self).filter { $0.startDay == startDay && $0.endDay == endDay }
+    public func allSummaries() throws -> [RangeSummary] {
+        try read("range_summaries", as: RangeSummary.self)
             .sorted { $0.createdAt == $1.createdAt ? $0.id.uuidString > $1.id.uuidString : $0.createdAt > $1.createdAt }
+    }
+    public func summaries(startDay: String, endDay: String) throws -> [RangeSummary] {
+        try allSummaries().filter { $0.startDay == startDay && $0.endDay == endDay }
     }
     public func reportEntries(day: String) throws -> [Entry] { try entries().filter { $0.day == day && $0.inReport }.sorted { $0.createdAt < $1.createdAt } }
     private func validateDay(_ day: String) throws {

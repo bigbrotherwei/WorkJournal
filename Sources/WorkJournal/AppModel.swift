@@ -205,8 +205,11 @@ import JournalCore
         do { return try database().summaries(startDay: range.startDay, endDay: range.endDay) }
         catch { self.error = error.localizedDescription; return [] }
     }
+    func summaryHistory(drafts: [String: RangeSummary]) throws -> [SummaryHistoryItem] {
+        SummaryHistoryItem.build(saved: try database().allSummaries(), drafts: drafts)
+    }
     func saveSummary(_ summary: RangeSummary) -> Bool {
-        do { try database().saveSummary(summary); notice = "总结已保存为新版本"; return true }
+        do { try database().saveSummary(summary); notice = "周报已保存为新版本"; return true }
         catch { self.error = error.localizedDescription; return false }
     }
     func generateSummary(range: SummaryRange, includeAllRecords: Bool, completion: @escaping (RangeSummary) -> Void) {
@@ -221,7 +224,7 @@ import JournalCore
             guard RangeSummaryGenerator.sameSources(range: range, original: sources, current: entries, includeAllRecords: includeAllRecords) else {
                 throw JournalError.invalid("生成期间范围内的素材发生变化，请重新生成总结。")
             }
-            completion(summary); notice = "总结已生成，请核对并保存"
+            completion(summary); notice = "周报已生成，请核对并保存"
         }
     }
     func reportArchive() throws -> [ReportArchiveDay] { try database().reportArchive() }

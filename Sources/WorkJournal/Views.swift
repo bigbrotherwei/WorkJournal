@@ -124,10 +124,10 @@ struct MainView: View {
                 }.padding(.top, 14)
                 VStack(alignment: .leading, spacing: 7) {
                     Text("工作空间").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.bottom, 5)
-                    ForEach(["记录", "待办", "日报", "周报 / 总结", "回收站", "设置"], id: \.self) { item in
+                    ForEach(["记录", "待办", "日报", "周报", "回收站", "设置"], id: \.self) { item in
                         Button { section = item } label: {
                             HStack(spacing: 11) {
-                                Image(systemName: ["记录": "tray.full", "待办": "checklist", "日报": "doc.text", "周报 / 总结": "calendar", "回收站": "trash", "设置": "slider.horizontal.3"][item] ?? "circle")
+                                Image(systemName: ["记录": "tray.full", "待办": "checklist", "日报": "doc.text", "周报": "calendar", "回收站": "trash", "设置": "slider.horizontal.3"][item] ?? "circle")
                                     .font(.system(size: 15)).frame(width: 22)
                                 Text(item).font(.system(size: 13, weight: section == item ? .semibold : .regular))
                                 Spacer()
@@ -157,7 +157,7 @@ struct MainView: View {
                 if section == "记录" { records }
                 else if section == "日报" { ReportView(app: app) }
                 else if section == "待办" { TaskListView(app: app) }
-                else if section == "周报 / 总结" { RangeSummaryView(app: app) }
+                else if section == "周报" { RangeSummaryView(app: app) }
                 else if section == "回收站" { TrashView(app: app) }
                 else { SettingsView(app: app) }
                 Divider().opacity(0.5)

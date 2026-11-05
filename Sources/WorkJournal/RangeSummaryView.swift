@@ -14,6 +14,7 @@ struct RangeSummaryView: View {
     @ViewState private var replacePrompt = false
     @ViewState private var startCalendar = false
     @ViewState private var endCalendar = false
+    @ViewState private var showingHistory = false
     private var range: SummaryRange? { try? SummaryRange(startDay: Days.key(start), endDay: Days.key(end)) }
     private var key: String { "\(Days.key(start))_\(Days.key(end))_\(includeAll)" }
     private var candidate: RangeSummary? { drafts[key] }
@@ -26,7 +27,12 @@ struct RangeSummaryView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            PageHeading(title: "范围总结", subtitle: "按原始文字记录总结跨日工作，同一事项合并呈现。图片不参与。")
+            HStack(alignment: .top) {
+                PageHeading(title: "周报", subtitle: "选择本周、上周或自选日期范围，归纳跨日工作。图片不参与。")
+                Spacer()
+                Button { showingHistory = true } label: { Label("历史周报", systemImage: "clock.arrow.circlepath") }
+                    .disabled(app.busy)
+            }
             HStack {
                 Button("本周") { select(.currentWeek()) }
                 Button("上周") { select(.previousWeek()) }
@@ -38,7 +44,7 @@ struct RangeSummaryView: View {
                 Text(includeAll ? "包含范围内全部未删除记录" : "仅使用已勾选“计入日报”的记录").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if app.busy { Button("取消", action: app.cancel) }
-                Button("生成总结") {
+                Button("生成周报") {
                     if !(candidate?.text ?? "").isEmpty { replacePrompt = true } else { generate() }
                 }.disabled(app.busy || range == nil)
             }
@@ -67,9 +73,9 @@ struct RangeSummaryView: View {
                 }
             }
             if preview {
-                MarkdownPreview(source: candidate?.text ?? "尚未生成总结")
+                MarkdownPreview(source: candidate?.text ?? "尚未生成周报")
             } else {
-                TextEditor(text: text).font(.system(.body, design: .monospaced)).accessibilityLabel("范围总结编辑内容")
+                TextEditor(text: text).font(.system(.body, design: .monospaced)).accessibilityLabel("周报编辑内容")
             }
             Text("编辑草稿自动保留；切换日期后返回可继续编辑。保存会创建独立新版本。").font(.caption).foregroundStyle(.secondary)
             HStack {
@@ -86,10 +92,26 @@ struct RangeSummaryView: View {
         }.padding(24)
         .onAppear { restore(); select(.currentWeek()); loadLatest() }
         .onChange(of: key) { _, _ in loadLatest() }
+        .sheet(isPresented: $showingHistory) {
+            SummaryHistoryView(app: app, drafts: drafts, select: openHistory)
+        }
         .confirmationDialog("重新生成将替换当前编辑；当前内容会保留到恢复草稿。", isPresented: $replacePrompt) {
             Button("保留草稿并重新生成") { if let current = candidate { archive(current); persist() }; generate() }
             Button("取消", role: .cancel) {}
         }
+    }
+    private func openHistory(_ item: SummaryHistoryItem) {
+        let summary = item.summary
+        guard let selectedRange = try? SummaryRange(startDay: summary.startDay, endDay: summary.endDay) else { return }
+        let destination = "\(summary.startDay)_\(summary.endDay)_\(summary.includeAllRecords)"
+        var preservedEdits = false
+        if let edited = drafts[destination], edited != summary, !edited.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            archive(edited); preservedEdits = true
+        }
+        drafts[destination] = summary
+        select(selectedRange); includeAll = summary.includeAllRecords; preview = true
+        persist()
+        feedback = (item.isDraft ? "已打开未保存草稿" : "已打开历史周报") + (preservedEdits ? "；原编辑已保留在“历史版本 → 恢复编辑草稿”中。" : "")
     }
     private func dateControl(_ label: String, date: Binding<Date>, showing: Binding<Bool>) -> some View {
         HStack(spacing: 5) {
