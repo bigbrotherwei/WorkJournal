@@ -34,31 +34,43 @@
 
 ## 界面预览
 
-以下截图来自此前版本，工作内容均为虚构演示数据；0.25.0 已更新为更明亮、圆润的界面。
+以下为 **0.26.4** 原生应用的实际界面，使用独立演示库拍摄，记录、日报和笔记内容均为虚构数据。
 
 ### 记录与每日总览
 
 查看近期记录热力图，按日期、分类和跟进状态回顾工作。
 
-![记录首页：每日热力图与分类记录列表](assets/screenshots/records.jpg)
+![记录首页：每日热力图与分类记录列表](assets/screenshots/0.26.4/records.jpg)
 
 ### 日报 Markdown 预览
 
 按日期查看已保存的日报，支持渲染预览、编辑和版本管理。
 
-![日报页面：按日期查看 Markdown 渲染后的日报](assets/screenshots/daily-report.jpg)
+![日报页面：按日期查看 Markdown 渲染后的日报](assets/screenshots/0.26.4/daily-report.jpg)
 
 ### 待办与截止时间
 
 按逾期、今天、以后和未设日期分组，集中跟进待处理事项。
 
-![待办页面：按截止时间分组的待处理事项](assets/screenshots/tasks.jpg)
+![待办页面：按截止时间分组的待处理事项](assets/screenshots/0.26.4/tasks.jpg)
 
 ### 周报与自选时间总结
 
 选择本周、上周或自定义日期范围，归纳跨天工作并导出 Markdown。
 
-![范围总结页面：日期选择与周报预览](assets/screenshots/weekly-summary.jpg)
+![周报页面：日期选择、历史周报与 Markdown 预览](assets/screenshots/0.26.4/weekly-summary.jpg)
+
+### 本地笔记本与图文编辑
+
+用多层目录整理笔记，在正文中直接编辑图片、表格、引用和代码；可随时切换 Markdown 源码。
+
+![笔记本页面：目录、笔记列表与图文编辑器](assets/screenshots/0.26.4/notebooks.jpg)
+
+### 笔记导入与导出
+
+选择有道云笔记、印象笔记或 Markdown 来源，检查后导入；支持按笔记或目录导出正文与资源。
+
+![笔记迁移页面：来源选择、预检导入与笔记导出](assets/screenshots/0.26.4/notebook-transfer.jpg)
 
 ## 构建与运行
 
