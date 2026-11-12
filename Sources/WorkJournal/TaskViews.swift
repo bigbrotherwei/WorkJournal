@@ -58,63 +58,116 @@ struct DueControls: View {
 
 struct TaskListView: View {
     @ObservedObject var app: AppModel
-    @ViewState private var editing: Entry?
-    @ViewState private var snoozing: Entry?
+    @ViewState private var editAnchors = TaskEditAnchors()
     private var pending: [Entry] { ReminderPolicy.pending(in: app.entries) }
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            PageHeading(title: "待办", subtitle: "按截止时间查看需要跟进的事项。")
-            TimelineView(.periodic(from: .now, by: 60)) { context in
-                if pending.isEmpty {
-                    ContentUnavailableView("暂无待处理事项", systemImage: "checkmark.circle", description: Text("把记录标为“待处理”，即可在这里跟进。"))
-                } else {
-                    List {
-                        ForEach(TaskDueGroup.allCases, id: \.self) { group in
-                            let items = pending.filter { ReminderPolicy.group(for: $0, now: context.date) == group }
-                            if !items.isEmpty {
-                                Section(group.rawValue + " · \(items.count)") {
-                                    ForEach(items) { entry in
-                                        HStack(alignment: .top, spacing: 12) {
-                                            Button { app.setFollowUp(id: entry.id, status: .done) } label: { Image(systemName: "circle").font(.title3) }
-                                                .buttonStyle(.plain).help("标为已完成").accessibilityLabel("标为已完成")
-                                            VStack(alignment: .leading, spacing: 5) {
-                                                Text(entry.plainText.isEmpty ? "图片记录" : entry.plainText).lineLimit(3)
-                                                HStack {
-                                                    Text("记录日期 " + entry.day)
-                                                    if let due = entry.dueAt { Text("截止 " + due.formatted(date: .abbreviated, time: .shortened)) }
-                                                    if entry.reminderEnabled { Image(systemName: "bell") }
-                                                    if entry.recurrence != .none { Label(entry.recurrence.label, systemImage: "repeat") }
-                                                }.font(.caption).foregroundStyle(.secondary)
-                                                if let snoozed = entry.snoozedUntil, entry.reminderEnabled {
-                                                    Label("提醒 " + snoozed.formatted(date: .abbreviated, time: .shortened), systemImage: "bell.badge")
-                                                        .font(.caption).foregroundStyle(JournalTheme.accent)
-                                                }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                HStack {
+                    PageHeading(title: "待办", subtitle: "专注下一步，点开事项即可安排时间。")
+                    Spacer()
+                    Text("\(pending.count) 项待处理").font(.callout).foregroundStyle(JournalTheme.Tone.mint.color)
+                        .padding(12).background(JournalTheme.Tone.mint.surface, in: Capsule())
+                }
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    if pending.isEmpty {
+                        ContentUnavailableView("暂无待处理事项", systemImage: "checkmark.circle", description: Text("把记录标为“待处理”，即可在这里跟进。"))
+                    } else {
+                        VStack(alignment: .leading, spacing: 24) {
+                            ForEach(TaskDueGroup.allCases, id: \.self) { group in
+                                let items = pending.filter { editAnchors.group(for: $0, now: context.date) == group }
+                                if !items.isEmpty {
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        Text(group.rawValue + " · \(items.count)").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary).padding(.leading, 4)
+                                        ForEach(items) { entry in
+                                            TaskRowView(app: app, entry: entry) { active in
+                                                if active { editAnchors.begin(entry, now: context.date) }
+                                                else { editAnchors.end(entry.id) }
                                             }
-                                            Spacer()
-                                            if entry.dueAt != nil {
-                                                Menu {
-                                                    ForEach(SnoozeChoice.allCases, id: \.self) { choice in
-                                                        Button(choice.label) { app.snooze(entry.id, until: choice.date()) }
-                                                    }
-                                                    Button("自选时间…") { snoozing = entry }
-                                                } label: { Label("稍后提醒", systemImage: "clock.arrow.circlepath") }
-                                                .fixedSize()
-                                            }
-                                            Button("编辑") { editing = entry }
-                                        }.padding(.vertical, 7).accessibilityElement(children: .contain)
+                                        }
                                     }
                                 }
                             }
                         }
-                    }.listStyle(.inset)
+                    }
                 }
-            }
-        }.padding(28)
-        .sheet(item: $editing) { EntryEditor(app: app, entry: $0) }
-        .sheet(item: $snoozing) { SnoozeTimeView(app: app, entry: $0) }
+            }.padding(26).frame(maxWidth: 1000).frame(maxWidth: .infinity)
+        }
     }
 }
 
+private struct TaskRowView: View {
+    @ObservedObject var app: AppModel
+    let entry: Entry
+    let editingChanged: (Bool) -> Void
+    @ObservedObject private var reminders: ReminderCoordinator
+    @ViewState private var original: Entry
+    @ViewState private var draft: Entry
+    @ViewState private var expanded = false
+    @ViewState private var editing = false
+    @ViewState private var snoozing = false
+    @ViewState private var confirmDiscard = false
+    init(app: AppModel, entry: Entry, editingChanged: @escaping (Bool) -> Void) {
+        self.app = app; self.entry = entry; self.editingChanged = editingChanged; reminders = app.reminders
+        _original = ViewState(wrappedValue: entry); _draft = ViewState(wrappedValue: entry)
+    }
+    private var dirty: Bool { expanded && draft != original }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                Button { app.setFollowUp(id: entry.id, status: .done) } label: {
+                    Image(systemName: "circle").font(.system(size: 22, weight: .light)).foregroundStyle(JournalTheme.Tone.mint.color)
+                        .frame(width: 30, height: 30).contentShape(Rectangle())
+                }.buttonStyle(.plain).disabled(dirty).help(dirty ? "先保存或取消时间调整" : "标为已完成").accessibilityLabel("标为已完成")
+                Button(action: toggle) {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(entry.plainText.isEmpty ? "图片记录" : entry.plainText).font(.system(size: 14, weight: .medium)).lineSpacing(4).lineLimit(expanded ? nil : 2).foregroundStyle(JournalTheme.ink)
+                        HStack(spacing: 10) {
+                            Text(entry.category)
+                            if let due = entry.dueAt { Label(due.formatted(date: .abbreviated, time: .shortened), systemImage: entry.reminderEnabled ? "bell" : "calendar") }
+                            if entry.recurrence != .none { Label(entry.recurrence.label, systemImage: "repeat") }
+                        }.font(.caption).foregroundStyle(.secondary)
+                        if let snoozed = entry.snoozedUntil, entry.reminderEnabled {
+                            Text("提醒延后至 " + snoozed.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(JournalTheme.accent)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel("展开待办：" + entry.plainText).accessibilityValue(expanded ? "已展开" : "已折叠")
+                Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.caption).foregroundStyle(.tertiary).padding(.top, 9).accessibilityHidden(true)
+            }
+            if expanded {
+                Divider().overlay(JournalTheme.border)
+                DueControls(optionalDate: $draft.dueAt, reminderEnabled: $draft.reminderEnabled, followUp: $draft.status, recurrence: $draft.recurrence, status: reminders.status)
+                HStack(spacing: 10) {
+                    Button("编辑内容") { editing = true }.disabled(dirty)
+                    if entry.dueAt != nil {
+                        Menu("稍后提醒") {
+                            ForEach(SnoozeChoice.allCases, id: \.self) { choice in Button(choice.label) { app.snooze(entry.id, until: choice.date()) } }
+                            Button("自选时间…") { snoozing = true }
+                        }.fixedSize().disabled(dirty)
+                    }
+                    Spacer()
+                    Button("取消", action: collapse)
+                    Button("保存安排") {
+                        if app.saveEdited(original: original, edited: draft) { collapse() }
+                    }.buttonStyle(JournalPrimaryButtonStyle()).disabled(!dirty)
+                }
+                if dirty { Text("时间安排尚未保存；保存后可完成或编辑内容。").font(.caption).foregroundStyle(.secondary) }
+            }
+        }.journalCard(padding: 18)
+            .sheet(isPresented: $editing, onDismiss: resetDraft) { EntryEditor(app: app, entry: entry) }
+            .sheet(isPresented: $snoozing) { SnoozeTimeView(app: app, entry: entry) }
+            .confirmationDialog("放弃尚未保存的时间安排？", isPresented: $confirmDiscard) {
+                Button("放弃并收起", role: .destructive, action: collapse)
+                Button("继续编辑", role: .cancel) {}
+            }
+    }
+    private func resetDraft() { let latest = app.entries.first { $0.id == entry.id } ?? entry; original = latest; draft = latest }
+    private func toggle() {
+        if expanded { if dirty { confirmDiscard = true } else { collapse() } }
+        else { resetDraft(); editingChanged(true); expanded = true }
+    }
+    private func collapse() { expanded = false; editingChanged(false) }
+}
 
 struct ReminderSettingsView: View {
     @ObservedObject var coordinator: ReminderCoordinator

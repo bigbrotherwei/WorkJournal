@@ -28,7 +28,7 @@ struct RangeSummaryView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top) {
-                PageHeading(title: "周报", subtitle: "选择本周、上周或自选日期范围，归纳跨日工作。图片不参与。")
+                PageHeading(title: "周报", subtitle: "把一段时间的努力，整理成一份清晰的回顾。")
                 Spacer()
                 Button { showingHistory = true } label: { Label("历史周报", systemImage: "clock.arrow.circlepath") }
                     .disabled(app.busy)
@@ -36,7 +36,11 @@ struct RangeSummaryView: View {
             HStack {
                 Button("本周") { select(.currentWeek()) }
                 Button("上周") { select(.previousWeek()) }
+                Spacer()
+            }.disabled(app.busy)
+            HStack {
                 dateControl("开始", date: $start, showing: $startCalendar)
+                Spacer(minLength: 8)
                 dateControl("结束", date: $end, showing: $endCalendar)
             }.disabled(app.busy)
             HStack {
@@ -46,13 +50,15 @@ struct RangeSummaryView: View {
                 if app.busy { Button("取消", action: app.cancel) }
                 Button("生成周报") {
                     if !(candidate?.text ?? "").isEmpty { replacePrompt = true } else { generate() }
-                }.disabled(app.busy || range == nil)
+                }.buttonStyle(JournalPrimaryButtonStyle()).disabled(app.busy || range == nil)
             }
             if range == nil { Text("结束日期不能早于开始日期。").foregroundStyle(.red) }
+            VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text(range?.title ?? "无效日期范围").font(.headline)
                 Spacer()
-                Toggle("预览", isOn: $preview).toggleStyle(.switch)
+                Picker("显示模式", selection: $preview) { Text("预览").tag(true); Text("编辑").tag(false) }
+                    .pickerStyle(.segmented).labelsHidden().frame(width: 120)
                 Menu("历史版本") {
                     if let range {
                         ForEach(app.summaryVersions(range: range).filter { $0.includeAllRecords == includeAll }) { version in
@@ -72,11 +78,23 @@ struct RangeSummaryView: View {
                     }
                 }
             }
-            if preview {
-                MarkdownPreview(source: candidate?.text ?? "尚未生成周报")
-            } else {
-                TextEditor(text: text).font(.system(.body, design: .monospaced)).accessibilityLabel("周报编辑内容")
-            }
+            Divider().overlay(JournalTheme.border)
+            Group {
+                if preview {
+                    if let source = candidate?.text, !source.isEmpty { MarkdownPreview(source: source) }
+                    else {
+                        VStack(spacing: 16) {
+                            JournalSymbol(name: "book", tone: .peach, size: 54)
+                            Text("这一周，值得回顾").font(.headline)
+                            Text("选择时间范围生成，或直接开始书写。").foregroundStyle(.secondary).font(.callout)
+                            Button("开始书写") { preview = false }.buttonStyle(JournalPrimaryButtonStyle())
+                        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                } else {
+                    TextEditor(text: text).font(.system(size: 14)).lineSpacing(7).scrollContentBackground(.hidden).accessibilityLabel("周报编辑内容")
+                }
+            }.frame(minHeight: 0, maxHeight: .infinity)
+            }.journalCard(padding: 22)
             Text("编辑草稿自动保留；切换日期后返回可继续编辑。保存会创建独立新版本。").font(.caption).foregroundStyle(.secondary)
             HStack {
                 Text(feedback).font(.caption).foregroundStyle(.secondary)
@@ -87,9 +105,9 @@ struct RangeSummaryView: View {
                     guard var summary = candidate else { return }
                     summary.id = UUID(); summary.createdAt = Date()
                     if app.saveSummary(summary) { drafts[key] = summary; persist(); feedback = "已保存新版本" }
-                }.disabled(app.busy || candidate?.text.isEmpty != false)
+                }.buttonStyle(JournalPrimaryButtonStyle()).disabled(app.busy || candidate?.text.isEmpty != false)
             }
-        }.padding(24)
+        }.padding(26).frame(maxWidth: 1050).frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { restore(); select(.currentWeek()); loadLatest() }
         .onChange(of: key) { _, _ in loadLatest() }
         .sheet(isPresented: $showingHistory) {

@@ -27,7 +27,15 @@ trap 'rm -rf "$STAGING_DIR"' EXIT
 STAGED_APP="$STAGING_DIR/WorkJournal.app"
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 cp Resources/AppIcon.icns "$STAGED_APP/Contents/Resources/AppIcon.icns"
+cp Resources/SwiftSoup-LICENSE.txt "$STAGED_APP/Contents/Resources/SwiftSoup-LICENSE.txt"
 cp "$BIN_DIR/WorkJournal" "$STAGED_APP/Contents/MacOS/WorkJournal"
+# Support both Xcode-style and portable SwiftPM resource bundle layouts.
+RESOURCE_BUNDLE="$BIN_DIR/WorkJournal_WorkJournal.bundle"
+if [[ ! -f "$RESOURCE_BUNDLE/Contents/Resources/NotebookEditor/index.html" && ! -f "$RESOURCE_BUNDLE/NotebookEditor/index.html" ]]; then
+  printf 'Offline notebook editor resource bundle is missing.\n' >&2
+  exit 1
+fi
+cp -R "$RESOURCE_BUNDLE" "$STAGED_APP/Contents/Resources/WorkJournal_WorkJournal.bundle"
 cat > "$STAGED_APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

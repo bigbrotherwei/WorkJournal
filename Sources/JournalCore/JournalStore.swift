@@ -38,8 +38,8 @@ public final class JournalStore {
     }
     private func migrateIfNeeded(url: URL) throws {
         let version = try scalar("PRAGMA user_version")
-        guard version <= 4 else { throw JournalError.invalid("数据库由更新版本应用创建，请使用更新的工作随记打开；未修改数据。") }
-        if version == 4 { try checkTables(includeSummaries: true); return }
+        guard version <= 5 else { throw JournalError.invalid("数据库由更新版本应用创建，请使用更新的工作随记打开；未修改数据。") }
+        if version == 5 { try checkTables(includeSummaries: true); try checkNotebookTables(); return }
         let tables = try scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
         if tables > 0 {
             guard tables == 2 || tables == 3 else { throw JournalError.invalid("无法识别旧数据库结构，已停止升级。") }
@@ -47,6 +47,7 @@ public final class JournalStore {
             try checkTables()
             // Verify legacy payloads before upgrading their container format.
             _ = try read("entries", as: Entry.self); _ = try read("reports", as: Report.self)
+            if version == 4 { _ = try read("range_summaries", as: RangeSummary.self) }
             let directory = url.deletingLastPathComponent().appendingPathComponent("Backups")
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let backupURL = directory.appendingPathComponent("before-schema-v\(version)-\(UUID()).sqlite")
@@ -55,13 +56,18 @@ public final class JournalStore {
         }
         try transaction {
             let current = try scalar("PRAGMA user_version")
-            guard current <= 4 else { throw JournalError.invalid("数据库版本已变化，停止升级，请重新打开应用。") }
-            if current == 4 { try checkTables(includeSummaries: true); return }
+            guard current <= 5 else { throw JournalError.invalid("数据库版本已变化，停止升级，请重新打开应用。") }
+            if current == 5 { try checkTables(includeSummaries: true); try checkNotebookTables(); return }
             try execute("CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             try execute("CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             try execute("CREATE TABLE IF NOT EXISTS range_summaries (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             try checkTables(includeSummaries: true)
-            try execute("PRAGMA user_version=4")
+            try execute("CREATE TABLE note_folders (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            try execute("CREATE TABLE notes (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            try execute("CREATE TABLE note_assets (id TEXT PRIMARY KEY, owner_note_id TEXT NOT NULL, payload TEXT NOT NULL, data BLOB NOT NULL)")
+            try execute("CREATE INDEX note_assets_owner ON note_assets(owner_note_id)")
+            try checkNotebookTables()
+            try execute("PRAGMA user_version=5")
         }
     }
     private func snapshot(to url: URL) throws {
@@ -82,11 +88,23 @@ public final class JournalStore {
         }
         complete = true
     }
+    func withStatement<T>(_ sql: String, _ body: (OpaquePointer?) throws -> T) throws -> T {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { throw failure() }
+        defer { sqlite3_finalize(statement) }
+        return try body(statement)
+    }
+    private func checkNotebookTables() throws {
+        for table in ["note_folders", "notes"] {
+            try withStatement("SELECT id,payload FROM \(table) LIMIT 0") { _ in }
+        }
+        try withStatement("SELECT id,owner_note_id,payload,data FROM note_assets LIMIT 0") { _ in }
+    }
     deinit { sqlite3_close(db) }
-    private func failure() -> JournalError {
+    func failure() -> JournalError {
         .invalid("本地数据库错误：\(db.map { String(cString: sqlite3_errmsg($0)) } ?? "无法打开")")
     }
-    private func execute(_ sql: String, values: [String] = []) throws {
+    func execute(_ sql: String, values: [String] = []) throws {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { throw failure() }
         defer { sqlite3_finalize(stmt) }
@@ -96,12 +114,14 @@ public final class JournalStore {
         }
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw failure() }
     }
-    private func read<T: Decodable>(_ table: String, as: T.Type) throws -> [T] {
+    func read<T: Decodable>(_ table: String, as: T.Type, cancelled: () -> Bool = { false }) throws -> [T] {
+        try checkNotebookCancellation(cancelled)
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, "SELECT payload FROM \(table)", -1, &stmt, nil) == SQLITE_OK else { throw failure() }
         defer { sqlite3_finalize(stmt) }
         var result: [T] = []
         while true {
+            try checkNotebookCancellation(cancelled)
             let status = sqlite3_step(stmt)
             if status == SQLITE_DONE { break }
             guard status == SQLITE_ROW, let text = sqlite3_column_text(stmt, 0) else { throw failure() }
@@ -109,7 +129,7 @@ public final class JournalStore {
         }
         return result
     }
-    private func payload<T: Encodable>(_ value: T) throws -> String {
+    func payload<T: Encodable>(_ value: T) throws -> String {
         String(decoding: try encoder.encode(value), as: UTF8.self)
     }
     public func save(_ proposed: Entry, now: Date = Date(), calendar: Calendar = .current) throws {
@@ -176,16 +196,18 @@ public final class JournalStore {
         public var reports: Int
         public var skipped: Int
         public var summaries: Int = 0
+        public var notebook: NotebookImportResult = NotebookImportResult()
     }
     private struct Backup: Codable {
         var formatVersion: Int
         var entries: [Entry]
         var reports: [Report]
         var summaries: [RangeSummary]?
+        var notebook: NotebookSnapshot?
     }
     public func importBackup(_ data: Data) throws -> ImportResult {
         let backup = try decoder.decode(Backup.self, from: data)
-        guard [1, 2, 3, 4].contains(backup.formatVersion) else { throw JournalError.invalid("备份版本不受支持，未修改本机数据。") }
+        guard [1, 2, 3, 4, 5].contains(backup.formatVersion) else { throw JournalError.invalid("备份版本不受支持，未修改本机数据。") }
         guard Set(backup.entries.map(\.id)).count == backup.entries.count,
               Set(backup.reports.map(\.id)).count == backup.reports.count,
               Set((backup.summaries ?? []).map(\.id)).count == (backup.summaries ?? []).count else {
@@ -206,6 +228,7 @@ public final class JournalStore {
             guard !report.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw JournalError.invalid("备份包含空白日报。") }
         }
         for summary in backup.summaries ?? [] { try validateSummary(summary) }
+        try NotebookValidation.validateStoredSnapshot(backup.notebook ?? NotebookSnapshot())
         return try transaction {
             let existing = try read("entries", as: Entry.self)
             let entryIDs = Set(existing.map(\.id))
@@ -241,6 +264,8 @@ public final class JournalStore {
                 if summaryIDs.contains(summary.id) { result.skipped += 1 }
                 else { try saveSummary(summary); result.summaries += 1 }
             }
+            result.notebook = try mergeNotebook(backup.notebook ?? NotebookSnapshot())
+            result.skipped += result.notebook.skipped
             return result
         }
     }
@@ -259,8 +284,8 @@ public final class JournalStore {
             return affected.count
         }
     }
-    private func transaction<T>(_ body: () throws -> T) throws -> T {
-        try execute("BEGIN IMMEDIATE")
+    func transaction<T>(beginSQL: String = "BEGIN IMMEDIATE", _ body: () throws -> T) throws -> T {
+        try execute(beginSQL)
         do {
             let result = try body()
             try execute("COMMIT")
@@ -268,7 +293,7 @@ public final class JournalStore {
         } catch { try? execute("ROLLBACK"); throw error }
     }
     public func exportBackup() throws -> Data {
-        let value = Backup(formatVersion: 4, entries: try read("entries", as: Entry.self), reports: try read("reports", as: Report.self), summaries: try read("range_summaries", as: RangeSummary.self))
+        let value = Backup(formatVersion: 5, entries: try read("entries", as: Entry.self), reports: try read("reports", as: Report.self), summaries: try read("range_summaries", as: RangeSummary.self), notebook: try notebookSnapshot())
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try encoder.encode(value)
     }

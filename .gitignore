@@ -10,3 +10,5 @@ Backups/
 .env.*
 *.p12
 *.pem
+.worktrees/
+.superpowers/

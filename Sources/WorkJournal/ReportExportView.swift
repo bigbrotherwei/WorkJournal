@@ -100,7 +100,7 @@ struct ReportExportView: View {
                 Button { saveFile() } label: { Label("保存为 .md 文件", systemImage: "square.and.arrow.down") }
                     .buttonStyle(JournalPrimaryButtonStyle()).disabled(markdown.isEmpty)
             }
-        }.padding(24).frame(width: 880, height: 640).background(JournalTheme.canvas).tint(JournalTheme.accent)
+        }.padding(24).frame(width: 880, height: 640).background(JournalTheme.canvas).tint(JournalTheme.accent).buttonStyle(JournalSecondaryButtonStyle())
             .onAppear { month = initialDate; reload() }
             .onChange(of: selected) { _, _ in feedback = "" }
     }
@@ -114,7 +114,7 @@ struct ReportExportView: View {
             Text("\(calendar.component(.day, from: date))").font(.system(size: 13, weight: enabled ? .semibold : .regular))
                 .frame(maxWidth: .infinity).frame(height: 30)
                 .foregroundStyle(chosen ? Color.white : enabled ? JournalTheme.accent : Color.secondary.opacity(0.5))
-                .background(chosen ? Color(red: 0.16, green: 0.43, blue: 0.37) : enabled ? JournalTheme.accent.opacity(0.1) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                .background(chosen ? JournalTheme.accentFill : enabled ? JournalTheme.accent.opacity(0.1) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
         }.buttonStyle(.plain).disabled(!enabled)
             .accessibilityLabel("\(day)，\(enabled ? (chosen ? "已选择" : "有日报") : "无已保存日报")")
     }

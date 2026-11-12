@@ -70,7 +70,23 @@ jobs:
             exit 1
           fi
 
-      - name: Run tests
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Test and verify offline editor bundle
+        working-directory: Editor
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+          npm run build
+          # The packaged editor must match the source and lockfile in this release.
+          git diff --exit-code -- ../Sources/WorkJournal/Resources/NotebookEditor
+          test -z "$(git ls-files --others --exclude-standard -- ../Sources/WorkJournal/Resources/NotebookEditor)"
+
+      - name: Run Swift and release metadata tests
         run: |
           bash scripts/test-release-metadata.sh
           bash scripts/test.sh

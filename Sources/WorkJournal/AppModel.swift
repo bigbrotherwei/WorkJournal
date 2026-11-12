@@ -7,6 +7,8 @@ import JournalCore
     @Published var trash: [Entry] = []
     @Published var navigationTarget: String?
     let reminders = ReminderCoordinator()
+    let notebook = NotebookModel()
+    private var dataDirectory: URL?
     @Published var draftRecurrence = TaskRecurrence(rawValue: UserDefaults.standard.string(forKey: "draftRecurrence") ?? "") ?? .none {
         didSet { UserDefaults.standard.set(draftRecurrence.rawValue, forKey: "draftRecurrence") }
     }
@@ -114,9 +116,12 @@ import JournalCore
     init() {
         do {
             let dir = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-            store = try JournalStore(url: dir.appendingPathComponent("WorkJournal/journal.sqlite"))
+            let root = ProcessInfo.processInfo.environment["WORKJOURNAL_DATA_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? dir.appendingPathComponent("WorkJournal", isDirectory: true)
+            dataDirectory = root
+            store = try JournalStore(url: root.appendingPathComponent("journal.sqlite"))
+            try notebook.configure(store: database(), directory: root)
             try reload()
-            let draftStore = DraftImageStore(url: dir.appendingPathComponent("WorkJournal/draft-content.json"))
+            let draftStore = DraftImageStore(url: root.appendingPathComponent("draft-content.json"))
             do {
                 if let content = try draftStore.load() { draft = content.text; draftImages = content.images }
             } catch {
@@ -365,6 +370,9 @@ import JournalCore
         } catch { self.error = error.localizedDescription; return false }
     }
     func importBackup() {
+        Task { do { try await notebook.flush(); importBackupAfterSaving() } catch { self.error = error.localizedDescription } }
+    }
+    private func importBackupAfterSaving() {
         guard !busy else { return }
         let panel = NSOpenPanel(); panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
         panel.message = "选择工作随记导出的 JSON 备份。同 ID 的本机记录及日报版本将保留。"
@@ -376,16 +384,19 @@ import JournalCore
             alert.informativeText = "只补回缺失记录和日报版本，不覆盖本机同 ID 内容；同一重复待办系列保留本机版本，避免重复。导入前会自动保存一份本机备份。"
             alert.addButton(withTitle: "合并导入"); alert.addButton(withTitle: "取消")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
-            let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-            let backupDir = root.appendingPathComponent("WorkJournal/Backups")
+            guard let dataDirectory else { throw JournalError.invalid("数据目录尚未就绪") }
+            let backupDir = dataDirectory.appendingPathComponent("Backups")
             try FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
             try database().exportBackup().write(to: backupDir.appendingPathComponent("before-import-\(UUID()).json"), options: .atomic)
             let result = try database().importBackup(data)
-            try reload(); scheduleClassification()
-            notice = "已恢复 \(result.entries) 条记录、\(result.reports) 个日报版本、\(result.summaries) 个范围总结；保留本机重复项 \(result.skipped) 个"
+            try reload(); try notebook.reload(); scheduleClassification()
+            notice = "已恢复 \(result.entries) 条记录、\(result.reports) 个日报版本、\(result.summaries) 个范围总结、\(result.notebook.notes) 篇笔记；保留本机重复项 \(result.skipped) 个"
         } catch { self.error = "导入失败：\(error.localizedDescription)" }
     }
     func exportBackup() {
+        Task { do { try await notebook.flush(); exportBackupAfterSaving() } catch { self.error = error.localizedDescription } }
+    }
+    private func exportBackupAfterSaving() {
         let panel = NSSavePanel(); panel.nameFieldStringValue = "工作随记备份-\(Days.key(Date())).json"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {

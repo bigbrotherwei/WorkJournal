@@ -38,7 +38,7 @@ struct PowerAndMigrationTests {
     private func legacyDB(_ url: URL) throws -> Entry {
         let entry = Entry(text: "升级前的原始记录", day: "2026-10-30")
         do { let store = try JournalStore(url: url); try store.save(entry); try store.saveReport(Report(day: entry.day, text: "手工日报")) }
-        try sql(url, "PRAGMA user_version=0")
+        try sql(url, "DROP TABLE note_assets; DROP TABLE notes; DROP TABLE note_folders; PRAGMA user_version=0")
         return entry
     }
     @Test func migrationBacksUpLegacyDatabaseAndPreservesRows() throws {
@@ -47,7 +47,7 @@ struct PowerAndMigrationTests {
         let url = root.appendingPathComponent("journal.sqlite")
         let entry = try legacyDB(url)
         let store = try JournalStore(url: url)
-        #expect(try scalar(url, "PRAGMA user_version") == 4)
+        #expect(try scalar(url, "PRAGMA user_version") == 5)
         #expect(try store.entries() == [entry])
         #expect(try store.reports(day: entry.day).first?.text == "手工日报")
         let backup = try #require(store.migrationBackupURL)
@@ -61,10 +61,10 @@ struct PowerAndMigrationTests {
         let url = root.appendingPathComponent("journal.sqlite")
         var entry = Entry(text: "图片迁移", day: "2026-11-04"); entry.images = [ImageAttachmentTests().picture()]
         do { let store = try JournalStore(url: url); try store.save(entry) }
-        try sql(url, "DROP TABLE range_summaries; PRAGMA user_version=2")
+        try sql(url, "DROP TABLE note_assets; DROP TABLE notes; DROP TABLE note_folders; DROP TABLE range_summaries; PRAGMA user_version=2")
         let store = try JournalStore(url: url)
         #expect(try store.entries() == [entry])
-        #expect(try scalar(url, "PRAGMA user_version") == 4)
+        #expect(try scalar(url, "PRAGMA user_version") == 5)
         #expect(try scalar(url, "SELECT count(*) FROM sqlite_master WHERE name='range_summaries'") == 1)
         let backup = try #require(store.migrationBackupURL)
         #expect(try scalar(backup, "PRAGMA user_version") == 2)

@@ -32,12 +32,15 @@ struct ReportArchiveView: View {
             } else if filtered.isEmpty {
                 ContentUnavailableView("暂无符合条件的日期", systemImage: "calendar", description: Text("保存日报或勾选“计入日报”的记录后，会在这里显示。"))
             } else {
-                List(filtered) { row in
+                ScrollView {
+                LazyVStack(spacing: 10) {
+                    ForEach(filtered) { row in
                     Button {
                         select(row.day)
                         dismiss()
                     } label: {
-                        HStack {
+                        HStack(spacing: 14) {
+                            JournalSymbol(name: "calendar", tone: .blue, size: 40)
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(row.day).font(.headline.monospacedDigit())
                                 Text("\(row.sourceCount) 条素材 · \(row.versionCount) 个已保存版本").font(.caption).foregroundStyle(.secondary)
@@ -46,10 +49,12 @@ struct ReportArchiveView: View {
                             Text(row.state.rawValue).font(.callout)
                             Image(systemName: "chevron.right").foregroundStyle(.secondary)
                         }.padding(.vertical, 8).contentShape(Rectangle())
-                    }.buttonStyle(.plain)
+                    }.buttonStyle(.plain).journalCard(padding: 14)
+                    }
+                }
                 }
             }
-        }.padding(24).frame(width: 640, height: 500).onAppear(perform: reload)
+        }.padding(24).frame(width: 640, height: 500).background(JournalTheme.canvas).buttonStyle(JournalSecondaryButtonStyle()).tint(JournalTheme.accent).onAppear(perform: reload)
     }
     private func reload() {
         do { rows = try app.reportArchive(); failure = nil }

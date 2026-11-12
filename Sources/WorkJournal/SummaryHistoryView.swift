@@ -35,13 +35,14 @@ struct SummaryHistoryView: View {
             } else {
                 Text("\(filtered.count) 条记录 · 已保存 \(filtered.filter { !$0.isDraft }.count) 个版本 · 草稿 \(filtered.filter(\.isDraft).count) 份")
                     .font(.caption).foregroundStyle(.secondary)
-                List(filtered) { row in
+                ScrollView {
+                LazyVStack(spacing: 10) {
+                    ForEach(filtered) { row in
                     Button {
                         select(row); dismiss()
                     } label: {
                         HStack(spacing: 14) {
-                            Image(systemName: row.isDraft ? "square.and.pencil" : "doc.text")
-                                .font(.title2).foregroundStyle(row.isDraft ? Color.orange : Color.accentColor)
+                            JournalSymbol(name: row.isDraft ? "square.and.pencil" : "book", tone: row.isDraft ? .peach : .violet, size: 40)
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack {
                                     Text(row.summary.startDay == row.summary.endDay ? row.summary.startDay : "\(row.summary.startDay) — \(row.summary.endDay)")
@@ -58,10 +59,12 @@ struct SummaryHistoryView: View {
                             Spacer(minLength: 0)
                             Image(systemName: "chevron.right").foregroundStyle(.secondary)
                         }.padding(.vertical, 8).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                    }.buttonStyle(.plain)
+                    }.buttonStyle(.plain).journalCard(padding: 14)
+                    }
+                }
                 }
             }
-        }.padding(24).frame(width: 720, height: 540).onAppear(perform: reload)
+        }.padding(24).frame(width: 720, height: 540).background(JournalTheme.canvas).buttonStyle(JournalSecondaryButtonStyle()).tint(JournalTheme.accent).onAppear(perform: reload)
     }
     private func reload() {
         do { rows = try app.summaryHistory(drafts: drafts); failure = nil }

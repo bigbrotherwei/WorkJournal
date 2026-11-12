@@ -16,6 +16,9 @@ import JournalCore
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {
+            NSApp.applicationIconImage = icon
+        }
         let menu = NSMenu()
         let root = NSMenuItem(); let appMenu = NSMenu()
         appMenu.addItem(withTitle: "退出工作随记", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -45,6 +48,7 @@ import JournalCore
         if mainWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             window.title = "工作随记"; window.isReleasedWhenClosed = false
+            window.minSize = NSSize(width: 900, height: 640); window.titlebarAppearsTransparent = true
             window.contentView = NSHostingView(rootView: MainView(app: model, capture: { [weak self] in self?.showCapture() }))
             window.center(); mainWindow = window
         }
@@ -77,6 +81,16 @@ import JournalCore
     }
     func closeCapture() { captureWindow?.orderOut(nil); previousApp?.activate(options: []); previousApp = nil }
     func applicationDidBecomeActive(_ notification: Notification) { model.reminders.reconcile(entries: model.entries) }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Task {
+            do { try await model.notebook.flush(); sender.reply(toApplicationShouldTerminate: true) }
+            catch {
+                let alert = NSAlert(); alert.messageText = "笔记尚未保存，已取消退出"; alert.informativeText = error.localizedDescription + "\n请保留窗口并复制需要的内容后重试。"; alert.addButton(withTitle: "继续编辑"); alert.runModal()
+                sender.reply(toApplicationShouldTerminate: false)
+            }
+        }
+        return .terminateLater
+    }
     func applicationWillTerminate(_ notification: Notification) { powerMonitor.stop(); shortcuts.stop(); if let eventHandler { RemoveEventHandler(eventHandler) } }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showMain(); return true }
