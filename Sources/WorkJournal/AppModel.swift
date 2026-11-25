@@ -8,7 +8,10 @@ import JournalCore
     @Published var navigationTarget: String?
     let reminders = ReminderCoordinator()
     let notebook = NotebookModel()
+    @Published private(set) var backupCoordinator: AutomaticBackupCoordinator?
+    @Published private(set) var ocrCoordinator: LocalOCRCoordinator?
     private var dataDirectory: URL?
+    var databaseURL: URL? { dataDirectory?.appendingPathComponent("journal.sqlite") }
     @Published var draftRecurrence = TaskRecurrence(rawValue: UserDefaults.standard.string(forKey: "draftRecurrence") ?? "") ?? .none {
         didSet { UserDefaults.standard.set(draftRecurrence.rawValue, forKey: "draftRecurrence") }
     }
@@ -38,6 +41,7 @@ import JournalCore
     @Published var error: String?
     @Published var notice = "所有记录仅保存在此 Mac"
     @Published var busy = false
+    @Published private(set) var backupTransferBusy = false
     @Published var generationProgress = ""
     @Published var isClassifying = false
     @Published var reportQueued = false
@@ -120,6 +124,7 @@ import JournalCore
             dataDirectory = root
             store = try JournalStore(url: root.appendingPathComponent("journal.sqlite"))
             try notebook.configure(store: database(), directory: root)
+            notebook.onCreateTask = { [weak self] text, noteID, title in self?.createTask(text: text, noteID: noteID, title: title) ?? false }
             try reload()
             let draftStore = DraftImageStore(url: root.appendingPathComponent("draft-content.json"))
             do {
@@ -131,16 +136,46 @@ import JournalCore
             }
             draftImageStore = draftStore
             if let backup = store?.migrationBackupURL { notice = "数据格式已升级，原始备份：" + backup.lastPathComponent }
+            ocrCoordinator = LocalOCRCoordinator(databaseURL: root.appendingPathComponent("journal.sqlite"), cacheURL: root.appendingPathComponent("image-ocr-index.json"))
+            let backups = AutomaticBackupCoordinator(dataDirectory: root, databaseURL: root.appendingPathComponent("journal.sqlite"), restore: { [weak self] url in self?.restoreBackup(url) })
+            backupCoordinator = backups
+            backups.start()
             scheduleClassification()
         } catch { self.error = error.localizedDescription }
+    }
+    private func createTask(text: String, noteID: UUID, title: String) -> Bool {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        var entry = Entry(text: text, day: Days.key(Date()))
+        entry.status = .pending; entry.sourceNoteID = noteID; entry.sourceNoteTitle = title
+        guard save(entry) else { return false }
+        notice = "已从笔记创建待办，可到待办页安排截止时间与提醒"
+        return true
+    }
+    func openSourceNote(_ id: UUID, find: String = "") {
+        Task {
+            do {
+                try await notebook.openNote(id: id, find: find)
+                navigationTarget = "笔记本"
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+    func savedSearchReport(_ result: UnifiedSearchResult) throws -> SearchReportPreview? {
+        if result.kind == .dailyReport, let report = try database().reports(day: result.day).first(where: { $0.id == result.ownerID }) {
+            return SearchReportPreview(id: report.id, title: report.day, text: report.text, provenance: report.provenance, savedAt: report.createdAt)
+        }
+        if result.kind == .rangeSummary, let summary = try database().summaries(startDay: result.day, endDay: result.endDay).first(where: { $0.id == result.ownerID }) {
+            return SearchReportPreview(id: summary.id, title: "\(summary.startDay) — \(summary.endDay)", text: summary.text, provenance: summary.provenance, savedAt: summary.createdAt)
+        }
+        return nil
     }
     private func database() throws -> JournalStore {
         guard let store else { throw JournalError.invalid("数据库未打开，请重启应用；原有数据不会被覆盖。") }
         return store
     }
-    private func reload() throws {
+    private func reload(checkBackup: Bool = true) throws {
         entries = try database().entries(); trash = try database().trashedEntries()
         reminders.reconcile(entries: entries)
+        if checkBackup { backupCoordinator?.checkIfNeeded() }
     }
     @discardableResult func save(_ entry: Entry) -> Bool {
         do { try database().save(entry); try reload(); scheduleClassification()
@@ -236,8 +271,8 @@ import JournalCore
     func versions(day: String) -> [Report] {
         do { return try database().reports(day: day) } catch { self.error = error.localizedDescription; return [] }
     }
-    func saveReport(day: String, text: String, sourceFingerprint: String?) -> Bool {
-        do { try database().saveReport(Report(day: day, text: text, sourceFingerprint: sourceFingerprint)); notice = "日报已保存为新版本"; return true }
+    func saveReport(day: String, text: String, sourceFingerprint: String?, provenance: ReportProvenance? = nil) -> Bool {
+        do { try database().saveReport(Report(day: day, text: text, sourceFingerprint: sourceFingerprint, provenance: provenance)); notice = "日报已保存为新版本"; return true }
         catch { self.error = error.localizedDescription; return false }
     }
     func refreshModels() async {
@@ -288,14 +323,14 @@ import JournalCore
             let selectedModel = model
             let template = ReportTemplate(opening: reportOpening, closing: reportClosing)
             run { [self] in
-                let text = try await ReportGenerator(client: client).generate(day: day, entries: sources, model: selectedModel, template: template) { [self] progress in
+                let report = try await ReportGenerator(client: client).generateReport(day: day, entries: sources, model: selectedModel, template: template) { [self] progress in
                     await MainActor.run { self.generationProgress = progress }
                 }
                 try Task.checkCancellation()
                 guard Prompts.sameReportSources(day: day, original: sources, current: try database().reportEntries(day: day)) else {
                     throw JournalError.invalid("生成期间日报素材发生了变化，旧结果已作废，请重新生成。")
                 }
-                completion(Report(day: day, text: text, sourceFingerprint: ReportFreshness.fingerprint(day: day, entries: sources)))
+                completion(report)
                 notice = "候选日报已生成，请检查后保存"
             }
         } catch { self.error = error.localizedDescription; resumeWork() }
@@ -329,10 +364,10 @@ import JournalCore
     }
     private func scheduleClassification() {
         scheduled?.cancel()
-        guard !powerSaving, !busy, !checkingModels, !queuePaused, !model.isEmpty else { return }
+        guard !powerSaving, !busy, !backupTransferBusy, !checkingModels, !queuePaused, !model.isEmpty else { return }
         scheduled = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: 700_000_000) } catch { return }
-            guard let self, !self.powerSaving, !self.busy, !self.checkingModels, !self.queuePaused, !self.model.isEmpty else { return }
+            guard let self, !self.powerSaving, !self.busy, !self.backupTransferBusy, !self.checkingModels, !self.queuePaused, !self.model.isEmpty else { return }
             self.drainClassification(manual: false)
         }
     }
@@ -370,38 +405,117 @@ import JournalCore
         } catch { self.error = error.localizedDescription; return false }
     }
     func importBackup() {
-        Task { do { try await notebook.flush(); importBackupAfterSaving() } catch { self.error = error.localizedDescription } }
+        guard !busy, !backupTransferBusy else { return }
+        Task { do { try await notebook.flush(); await importBackupAfterSaving() } catch { self.error = error.localizedDescription } }
     }
-    private func importBackupAfterSaving() {
-        guard !busy else { return }
+    private func importBackupAfterSaving() async {
+        guard !busy, !backupTransferBusy else { return }
         let panel = NSOpenPanel(); panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
         panel.message = "选择工作随记导出的 JSON 备份。同 ID 的本机记录及日报版本将保留。"
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        await mergeBackup(url)
+    }
+    func restoreBackup(_ url: URL) {
+        guard !busy, !backupTransferBusy else { error = "请等待当前操作完成后恢复备份。"; return }
+        Task { do { try await notebook.flush(); await mergeBackup(url) } catch { self.error = error.localizedDescription } }
+    }
+    private func mergeBackup(_ url: URL) async {
+        guard !busy, !checkingModels, !backupTransferBusy else { error = "请等待当前操作完成后恢复备份。"; return }
+        backupTransferBusy = true
+        defer { backupTransferBusy = false; scheduleClassification() }
+        var contentImported = false
         do {
-            let data = try Data(contentsOf: url)
+            // Reading and validating a large archive must not freeze the confirmation UI.
+            let (data, preview, extras) = try await Task.detached(priority: .userInitiated) {
+                let data = try Data(contentsOf: url)
+                return (data, try JournalStore.backupPreview(data), try JournalStore.backupExtras(data))
+            }.value
             let alert = NSAlert()
             alert.messageText = "合并此备份到本机？"
-            alert.informativeText = "只补回缺失记录和日报版本，不覆盖本机同 ID 内容；同一重复待办系列保留本机版本，避免重复。导入前会自动保存一份本机备份。"
+            alert.informativeText = "包含 \(preview.entries) 条记录、\(preview.reports) 个日报版本、\(preview.summaries) 个周报版本、\(preview.notes) 篇笔记和 \(preview.customTemplates) 个自定义模板。\n\n只补回缺失资料和模板，保留本机同 ID 内容及重复待办系列。恢复前会备份本机资料与设置。"
+            let restoreSettings = NSButton(checkboxWithTitle: "同时恢复应用设置（保留本机备份目录）", target: nil, action: nil)
+            restoreSettings.state = .off
+            if preview.hasPreferences {
+                restoreSettings.frame = NSRect(x: 0, y: 0, width: 370, height: 24)
+                alert.accessoryView = restoreSettings
+            } else {
+                alert.informativeText += "\n\n此旧版备份没有应用设置和模板，现有设置与模板保持不变。"
+            }
             alert.addButton(withTitle: "合并导入"); alert.addButton(withTitle: "取消")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
+            // Flush again because the archive was validated asynchronously while editing remained possible.
+            try await notebook.flush()
+            guard !busy, !checkingModels else { throw JournalError.invalid("本地模型仍在处理中，请结束后重新恢复备份。") }
+            let preferencesStore = BackupPreferencesStore()
+            let prepared = try extras.map { try preferencesStore.prepareRestore($0, restorePreferences: restoreSettings.state == .on) }
             guard let dataDirectory else { throw JournalError.invalid("数据目录尚未就绪") }
             let backupDir = dataDirectory.appendingPathComponent("Backups")
             try FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
-            try database().exportBackup().write(to: backupDir.appendingPathComponent("before-import-\(UUID()).json"), options: .atomic)
+            let beforeImport = try database().exportBackup(extras: captureBackupExtras())
+            let beforeURL = backupDir.appendingPathComponent("before-import-\(UUID()).json")
+            try beforeImport.write(to: beforeURL, options: .atomic)
+            guard try Data(contentsOf: beforeURL) == beforeImport else { throw JournalError.invalid("恢复前备份校验失败，尚未导入。") }
             let result = try database().importBackup(data)
-            try reload(); try notebook.reload(); scheduleClassification()
-            notice = "已恢复 \(result.entries) 条记录、\(result.reports) 个日报版本、\(result.summaries) 个范围总结、\(result.notebook.notes) 篇笔记；保留本机重复项 \(result.skipped) 个"
-        } catch { self.error = "导入失败：\(error.localizedDescription)" }
+            contentImported = true
+            var warnings: [String] = []
+            if let prepared {
+                var restoreShortcut = true
+                if let preferences = prepared.preferences, preferences.shortcut != shortcut {
+                    do {
+                        guard let registerShortcut else { throw JournalError.invalid("快捷键服务尚未准备好") }
+                        try registerShortcut(preferences.shortcut)
+                        shortcut = preferences.shortcut
+                        shortcutStatus = "已启用：" + shortcut.label
+                    } catch {
+                        restoreShortcut = false
+                        warnings.append("快捷键未恢复，继续使用 \(shortcut.label)：\(error.localizedDescription)")
+                    }
+                }
+                preferencesStore.apply(prepared, restoreShortcut: restoreShortcut)
+                TemplateLibrary.shared.reload()
+                if let preferences = prepared.preferences {
+                    model = preferences.model
+                    powerMode = preferences.powerMode
+                    reportOpening = preferences.reportOpening
+                    reportClosing = preferences.reportClosing
+                    notebook.editor.applyFontPreference(preferences.notebookFontSize)
+                }
+            }
+            try reload(checkBackup: false)
+            try notebook.reload()
+            notice = "已恢复 \(result.entries) 条记录、\(result.reports) 个日报版本、\(result.summaries) 个周报版本、\(result.notebook.notes) 篇笔记、\(prepared?.addedTemplates ?? 0) 个模板；保留本机重复项 \(result.skipped + (prepared?.skippedTemplates ?? 0)) 个"
+            if let schedule = prepared?.preferences?.automaticBackup {
+                do {
+                    guard let coordinator = backupCoordinator else { throw JournalError.invalid("自动备份服务尚未准备好") }
+                    try await coordinator.restoreSchedule(schedule)
+                } catch { warnings.append("自动备份设置未恢复：\(error.localizedDescription)") }
+            }
+            if prepared?.preferences != nil { notice += "；应用设置已处理" }
+            error = warnings.isEmpty ? nil : "资料已合并。" + warnings.joined(separator: "；")
+            backupCoordinator?.checkIfNeeded()
+        } catch { self.error = (contentImported ? "资料已合并，但后续设置或刷新未完成：" : "导入失败，尚未合并资料：") + error.localizedDescription }
+    }
+    private func captureBackupExtras() throws -> BackupExtras {
+        try BackupPreferencesStore().capture(automaticBackup: backupCoordinator?.ready == true ? backupCoordinator?.settings : nil)
     }
     func exportBackup() {
-        Task { do { try await notebook.flush(); exportBackupAfterSaving() } catch { self.error = error.localizedDescription } }
+        guard !backupTransferBusy else { return }
+        Task { do { try await notebook.flush(); await exportBackupAfterSaving() } catch { self.error = error.localizedDescription } }
     }
-    private func exportBackupAfterSaving() {
+    private func exportBackupAfterSaving() async {
+        guard !backupTransferBusy else { return }
         let panel = NSSavePanel(); panel.nameFieldStringValue = "工作随记备份-\(Days.key(Date())).json"
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        backupTransferBusy = true
+        defer { backupTransferBusy = false; scheduleClassification() }
         do {
-            let data = try database().exportBackup()
-            try data.write(to: url, options: .atomic); notice = "备份已导出"
+            guard let databaseURL else { throw JournalError.invalid("数据目录尚未就绪") }
+            let extras = try captureBackupExtras()
+            try await Task.detached(priority: .utility) {
+                let data = try JournalStore(url: databaseURL).exportBackup(extras: extras)
+                try data.write(to: url, options: .atomic)
+            }.value
+            notice = "备份已导出，包含应用设置和 \(extras.customTemplates.count) 个自定义模板"
         } catch { self.error = error.localizedDescription }
     }
 }

@@ -3,14 +3,26 @@ import JournalCore
 
 struct MarkdownPreview: View {
     let source: String
+    var provenance: ReportProvenance? = nil
+    @ViewState private var displayedSources: SourcePresentation?
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                if let provenance {
+                    HStack {
+                        Button { displayedSources = SourcePresentation(title: "生成时的全部素材", sources: provenance.sources) } label: { Label("查看生成素材（\(provenance.sources.count)）", systemImage: "doc.text.magnifyingglass") }
+                        Spacer()
+                    }
+                    Text(source == provenance.generatedText ? "要点旁可查看模型标注的来源；未标注的要点请核对全部素材。" : "正文已修改，原要点对应关系已停用；仍可查看生成时的素材。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Divider()
+                }
                 ForEach(Array(MarkdownBlocks.parse(source).enumerated()), id: \.offset) { _, block in
                     blockView(block)
                 }
             }.frame(maxWidth: 740, alignment: .leading).frame(maxWidth: .infinity).padding(6).textSelection(.enabled)
         }.accessibilityLabel("日报排版预览")
+        .sheet(item: $displayedSources) { item in ReportSourcesView(title: item.title, sources: item.sources) }
     }
     private func inline(_ text: String) -> Text {
         let parsed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
@@ -27,6 +39,12 @@ struct MarkdownPreview: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(marker).foregroundStyle(JournalTheme.accent).frame(minWidth: 16, alignment: .trailing)
                 inline(text).frame(maxWidth: .infinity, alignment: .leading)
+                if let provenance {
+                    let sources = provenance.sources(forPoint: text, currentText: source)
+                    if !sources.isEmpty {
+                        Button { displayedSources = SourcePresentation(title: "模型标注的来源，请核对", sources: sources) } label: { Image(systemName: "link.circle") }.buttonStyle(.plain).foregroundStyle(JournalTheme.accent).help("查看此要点来源").accessibilityLabel("查看此要点来源")
+                    }
+                }
             }.font(.system(size: 14)).lineSpacing(5).padding(.leading, 4)
         case let .quote(text):
             HStack(spacing: 12) {

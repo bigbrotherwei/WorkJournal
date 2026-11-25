@@ -134,6 +134,9 @@ private struct TaskRowView: View {
                 }.buttonStyle(.plain).accessibilityLabel("展开待办：" + entry.plainText).accessibilityValue(expanded ? "已展开" : "已折叠")
                 Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.caption).foregroundStyle(.tertiary).padding(.top, 9).accessibilityHidden(true)
             }
+            if let source = entry.sourceNoteID {
+                Button { app.openSourceNote(source) } label: { Label("来源笔记：" + (entry.sourceNoteTitle ?? "打开笔记"), systemImage: "book.closed") }.font(.caption).disabled(dirty)
+            }
             if expanded {
                 Divider().overlay(JournalTheme.border)
                 DueControls(optionalDate: $draft.dueAt, reminderEnabled: $draft.reminderEnabled, followUp: $draft.status, recurrence: $draft.recurrence, status: reminders.status)

@@ -11,6 +11,9 @@ resource=str(root/'Sources/WorkJournal/Resources/NotebookEditor/index.html').rep
 source=source.replace('Bundle.module.url(forResource: "index", withExtension: "html", subdirectory: "NotebookEditor")', 'URL(fileURLWithPath: "'+resource+'")')
 source+='\n'+(root/'Editor/test/native-harness.swift').read_text()
 (out/'Controller.swift').write_text(source)
+# Only the Codable version types are needed by this isolated WebKit harness.
+history=(root/'Sources/JournalCore/NotebookHistory.swift').read_text().split('public enum NotebookHistoryPolicy')[0]
+(out/'HistoryTypes.swift').write_text(history)
 PY
-swiftc -parse-as-library -swift-version 5 -module-cache-path "$PWD/.build/module-cache" Sources/JournalCore/NotebookModels.swift "$TEST_DIR/Controller.swift" -o "$TEST_DIR/harness"
+swiftc -parse-as-library -swift-version 5 -module-cache-path "$PWD/.build/module-cache" Sources/JournalCore/NotebookModels.swift "$TEST_DIR/HistoryTypes.swift" "$TEST_DIR/Controller.swift" -o "$TEST_DIR/harness"
 "$TEST_DIR/harness"

@@ -1,5 +1,5 @@
 import Foundation
-public enum PowerMode: String, Codable, CaseIterable { case automatic = "自动", saving = "始终省电", unrestricted = "允许后台分类" }
+public enum PowerMode: String, Codable, CaseIterable, Sendable { case automatic = "自动", saving = "始终省电", unrestricted = "允许后台分类" }
 public enum PowerSource: String { case battery = "电池供电", external = "外接电源", unknown = "电源状态未知" }
 public struct PowerSnapshot: Equatable {
     public var source: PowerSource

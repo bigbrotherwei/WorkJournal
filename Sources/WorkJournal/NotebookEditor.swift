@@ -32,6 +32,8 @@ enum NoteEditorError: LocalizedError {
 @MainActor
 final class NoteEditorController: NSObject, ObservableObject, WKNavigationDelegate {
     @Published private(set) var isReady = false
+    @Published private(set) var isReading = false
+    private var pendingFind: (UUID, String)?
     private(set) var sessionID = UUID()
     private(set) var latestUpdate: NoteEditorUpdate?
     var onChange: ((NoteEditorUpdate) -> Void)?
@@ -57,6 +59,7 @@ final class NoteEditorController: NSObject, ObservableObject, WKNavigationDelega
         guard force || latestUpdate?.noteID != noteID else { return }
         guard markdown.utf8.count <= maxTextBytes else { onError?("笔记超过 8 MiB，无法载入编辑器。"); return }
         cancelFlushes(NoteEditorError.changedSession)
+        if latestUpdate?.noteID != noteID { pendingFind = nil }
         sessionID = UUID()
         isReady = false
         initializing = false
@@ -103,6 +106,47 @@ final class NoteEditorController: NSObject, ObservableObject, WKNavigationDelega
         editorWebView?.callAsyncJavaScript("return await window.notebook.command(name)", arguments: ["name": name], in: nil, in: .page, completionHandler: nil)
     }
 
+    func applyFontPreference(_ size: Int) {
+        guard isReady, [12, 14, 16, 18, 20, 24].contains(size) else { return }
+        editorWebView?.callAsyncJavaScript("window.notebook.setFontSize(size)", arguments: ["size": size], in: nil, in: .page, completionHandler: nil)
+    }
+
+    /// Native search can arrive before WKWebView finishes loading a new note.
+    func find(text: String) {
+        guard let noteID = latestUpdate?.noteID, text.utf8.count <= maxTextBytes else { return }
+        pendingFind = (noteID, text)
+        applyPendingFind()
+    }
+    private func applyPendingFind() {
+        guard isReady, let (noteID, text) = pendingFind, noteID == latestUpdate?.noteID else { return }
+        pendingFind = nil
+        editorWebView?.callAsyncJavaScript("window.notebook.find(text)", arguments: ["text": text], in: nil, in: .page, completionHandler: nil)
+    }
+    func insertMarkdown(_ markdown: String) async throws {
+        guard markdown.utf8.count <= maxTextBytes else { throw NoteEditorError.invalidMessage }
+        _ = try await workflowCall("return await window.notebook.insertMarkdown(text)", arguments: ["text": markdown])
+    }
+    func selectedText() async throws -> String {
+        guard let text = try await workflowCall("return await window.notebook.selectedText()", arguments: [:]) as? String,
+              text.utf8.count <= maxTextBytes else { throw NoteEditorError.invalidMessage }
+        return text
+    }
+    func setReading(_ value: Bool) {
+        guard isReady else { return }
+        editorWebView?.callAsyncJavaScript("return await window.notebook.setReading(value)", arguments: ["value": value], in: nil, in: .page, completionHandler: nil)
+    }
+    private func workflowCall(_ script: String, arguments: [String: Any]) async throws -> Any? {
+        let expected = sessionID
+        _ = try await flush()
+        guard sessionID == expected, let webView = editorWebView else { throw NoteEditorError.changedSession }
+        return try await withCheckedThrowingContinuation { continuation in
+            webView.callAsyncJavaScript(script, arguments: arguments, in: nil, in: .page) { [weak self] result in
+                guard self?.sessionID == expected else { continuation.resume(throwing: NoteEditorError.changedSession); return }
+                switch result { case .success(let value): continuation.resume(returning: value); case .failure(let error): continuation.resume(throwing: error) }
+            }
+        }
+    }
+
     fileprivate func makeWebView() -> WKWebView {
         if let editorWebView { return editorWebView }
         let configuration = WKWebViewConfiguration()
@@ -144,7 +188,13 @@ final class NoteEditorController: NSObject, ObservableObject, WKNavigationDelega
         if type == "boot" { booted = true; initializeIfPossible(); return }
         guard validIdentity(body), let current = latestUpdate else { return }
         switch type {
-        case "ready": isReady = true
+        case "ready":
+            isReady = true
+            applyPendingFind()
+            let size = UserDefaults.standard.integer(forKey: "notebook.fontSize")
+            applyFontPreference(size)
+        case "readingChanged": if let reading = body["reading"] as? Bool { isReading = reading }
+        case "fontChanged": if let size = body["fontSize"] as? Int, [12, 14, 16, 18, 20, 24].contains(size) { UserDefaults.standard.set(size, forKey: "notebook.fontSize") }
         case "change": if let update = decodeUpdate(body) { accept(update) }
         case "error": if let text = body["message"] as? String, text.utf8.count <= 4096 { onError?(text) }
         case "saveRequested": onSaveRequested?()

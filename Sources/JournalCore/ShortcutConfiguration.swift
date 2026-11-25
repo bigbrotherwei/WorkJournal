@@ -1,5 +1,5 @@
 import Foundation
-public struct ShortcutConfiguration: Codable, Equatable {
+public struct ShortcutConfiguration: Codable, Equatable, Sendable {
     public var keyCode: UInt32
     public var control: Bool
     public var option: Bool

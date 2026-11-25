@@ -4,6 +4,7 @@ import CSQLite
 /// Confined to its caller's serial executor (the app uses the main actor).
 public final class JournalStore {
     public private(set) var migrationBackupURL: URL?
+    var notebookSaveValidationStamp: NotebookSaveValidationStamp?
     private var db: OpaquePointer?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -38,16 +39,20 @@ public final class JournalStore {
     }
     private func migrateIfNeeded(url: URL) throws {
         let version = try scalar("PRAGMA user_version")
-        guard version <= 5 else { throw JournalError.invalid("数据库由更新版本应用创建，请使用更新的工作随记打开；未修改数据。") }
-        if version == 5 { try checkTables(includeSummaries: true); try checkNotebookTables(); return }
+        guard version <= 6 else { throw JournalError.invalid("数据库由更新版本应用创建，请使用更新的工作随记打开；未修改数据。") }
+        if version == 6 { try checkTables(includeSummaries: true); try checkNotebookTables(); try checkHistoryTable(); return }
         let tables = try scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
         if tables > 0 {
-            guard tables == 2 || tables == 3 else { throw JournalError.invalid("无法识别旧数据库结构，已停止升级。") }
+            guard tables == 2 || tables == 3 || version == 5 && tables == 6 else { throw JournalError.invalid("无法识别旧数据库结构，已停止升级。") }
             if tables == 3 { guard try scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='range_summaries'") == 1 else { throw JournalError.invalid("无法识别旧数据库结构。") } }
             try checkTables()
             // Verify legacy payloads before upgrading their container format.
             _ = try read("entries", as: Entry.self); _ = try read("reports", as: Report.self)
-            if version == 4 { _ = try read("range_summaries", as: RangeSummary.self) }
+            if version >= 4 { _ = try read("range_summaries", as: RangeSummary.self) }
+            if version == 5 {
+                try checkNotebookTables()
+                try NotebookValidation.validateStoredSnapshot(NotebookSnapshot(folders: try noteFolders(includeDeleted: true), notes: try notes(includeDeleted: true), assets: try read("note_assets", as: NoteAsset.self)))
+            }
             let directory = url.deletingLastPathComponent().appendingPathComponent("Backups")
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let backupURL = directory.appendingPathComponent("before-schema-v\(version)-\(UUID()).sqlite")
@@ -56,18 +61,21 @@ public final class JournalStore {
         }
         try transaction {
             let current = try scalar("PRAGMA user_version")
-            guard current <= 5 else { throw JournalError.invalid("数据库版本已变化，停止升级，请重新打开应用。") }
-            if current == 5 { try checkTables(includeSummaries: true); try checkNotebookTables(); return }
+            guard current <= 6 else { throw JournalError.invalid("数据库版本已变化，停止升级，请重新打开应用。") }
+            if current == 6 { try checkTables(includeSummaries: true); try checkNotebookTables(); try checkHistoryTable(); return }
             try execute("CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             try execute("CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             try execute("CREATE TABLE IF NOT EXISTS range_summaries (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             try checkTables(includeSummaries: true)
-            try execute("CREATE TABLE note_folders (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
-            try execute("CREATE TABLE notes (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
-            try execute("CREATE TABLE note_assets (id TEXT PRIMARY KEY, owner_note_id TEXT NOT NULL, payload TEXT NOT NULL, data BLOB NOT NULL)")
-            try execute("CREATE INDEX note_assets_owner ON note_assets(owner_note_id)")
+            try execute("CREATE TABLE IF NOT EXISTS note_folders (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            try execute("CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            try execute("CREATE TABLE IF NOT EXISTS note_assets (id TEXT PRIMARY KEY, owner_note_id TEXT NOT NULL, payload TEXT NOT NULL, data BLOB NOT NULL)")
+            try execute("CREATE INDEX IF NOT EXISTS note_assets_owner ON note_assets(owner_note_id)")
             try checkNotebookTables()
-            try execute("PRAGMA user_version=5")
+            try execute("CREATE TABLE IF NOT EXISTS note_history (id TEXT PRIMARY KEY, note_id TEXT NOT NULL, saved_at REAL NOT NULL, payload TEXT NOT NULL)")
+            try execute("CREATE INDEX IF NOT EXISTS note_history_owner ON note_history(note_id,saved_at)")
+            try checkHistoryTable()
+            try execute("PRAGMA user_version=6")
         }
     }
     private func snapshot(to url: URL) throws {
@@ -86,6 +94,12 @@ public final class JournalStore {
         guard step == SQLITE_DONE && finish == SQLITE_OK else {
             throw JournalError.invalid("升级前备份未完成，可能数据库正在使用；已停止升级，请稍后重试。")
         }
+        var check: OpaquePointer?
+        defer { sqlite3_finalize(check) }
+        guard sqlite3_prepare_v2(destination, "PRAGMA integrity_check", -1, &check, nil) == SQLITE_OK,
+              sqlite3_step(check) == SQLITE_ROW, let value = sqlite3_column_text(check, 0), String(cString: value) == "ok" else {
+            throw JournalError.invalid("升级前备份校验失败，已停止升级。")
+        }
         complete = true
     }
     func withStatement<T>(_ sql: String, _ body: (OpaquePointer?) throws -> T) throws -> T {
@@ -99,6 +113,9 @@ public final class JournalStore {
             try withStatement("SELECT id,payload FROM \(table) LIMIT 0") { _ in }
         }
         try withStatement("SELECT id,owner_note_id,payload,data FROM note_assets LIMIT 0") { _ in }
+    }
+    private func checkHistoryTable() throws {
+        try withStatement("SELECT id,note_id,saved_at,payload FROM note_history LIMIT 0") { _ in }
     }
     deinit { sqlite3_close(db) }
     func failure() -> JournalError {
@@ -166,6 +183,7 @@ public final class JournalStore {
                 next.recurrence = entry.recurrence; next.recurrenceDayOfMonth = entry.recurrenceDayOfMonth; next.recurrenceClock = entry.recurrenceClock
                 next.recurrenceSeriesID = entry.recurrenceSeriesID
                 next.category = entry.category; next.manualCategory = entry.manualCategory; next.images = entry.images
+                next.sourceNoteID = entry.sourceNoteID; next.sourceNoteTitle = entry.sourceNoteTitle
                 entry.nextOccurrenceID = next.id
                 try persist(next)
             }
@@ -188,7 +206,7 @@ public final class JournalStore {
         guard entry.hasContent else { throw JournalError.invalid("请输入文字或添加图片") }
         try RecordContent.validate(text: entry.text, images: entry.images)
         try RecurringTasks.validate(entry)
-        try validateDay(entry.day)
+        try Self.validateDay(entry.day)
         try execute("INSERT INTO entries(id,payload) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", values: [entry.id.uuidString, try payload(entry)])
     }
     public struct ImportResult {
@@ -204,10 +222,15 @@ public final class JournalStore {
         var reports: [Report]
         var summaries: [RangeSummary]?
         var notebook: NotebookSnapshot?
+        var extras: BackupExtras?
     }
-    public func importBackup(_ data: Data) throws -> ImportResult {
-        let backup = try decoder.decode(Backup.self, from: data)
-        guard [1, 2, 3, 4, 5].contains(backup.formatVersion) else { throw JournalError.invalid("备份版本不受支持，未修改本机数据。") }
+    private static func validatedBackup(_ data: Data) throws -> Backup {
+        let backup = try JSONDecoder().decode(Backup.self, from: data)
+        guard (1...7).contains(backup.formatVersion) else { throw JournalError.invalid("备份版本不受支持，未修改本机数据。") }
+        guard backup.formatVersion == 7 || backup.extras == nil else {
+            throw JournalError.invalid("旧版备份不能包含应用设置或模板，未修改本机数据。")
+        }
+        try backup.extras?.validate()
         guard Set(backup.entries.map(\.id)).count == backup.entries.count,
               Set(backup.reports.map(\.id)).count == backup.reports.count,
               Set((backup.summaries ?? []).map(\.id)).count == (backup.summaries ?? []).count else {
@@ -215,7 +238,7 @@ public final class JournalStore {
         }
         // Validate even skipped rows, so corrupted files cannot look like successful imports.
         for entry in backup.entries {
-            try validateDay(entry.day)
+            try Self.validateDay(entry.day)
             try RecordContent.validate(text: entry.text, images: entry.images)
             try RecurringTasks.validate(entry)
             guard entry.hasContent,
@@ -224,11 +247,23 @@ public final class JournalStore {
             }
         }
         for report in backup.reports {
-            try validateDay(report.day)
+            try Self.validateDay(report.day)
             guard !report.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw JournalError.invalid("备份包含空白日报。") }
         }
-        for summary in backup.summaries ?? [] { try validateSummary(summary) }
+        for summary in backup.summaries ?? [] { try Self.validateSummary(summary) }
         try NotebookValidation.validateStoredSnapshot(backup.notebook ?? NotebookSnapshot())
+        if let notebook = backup.notebook { try NotebookHistoryPolicy.validate(notebook.history, notes: notebook.notes, assets: notebook.assets) }
+        return backup
+    }
+    public static func backupPreview(_ data: Data) throws -> BackupPreview {
+        let backup = try validatedBackup(data)
+        return BackupPreview(entries: backup.entries.count, reports: backup.reports.count, summaries: backup.summaries?.count ?? 0, notes: backup.notebook?.notes.count ?? 0, folders: backup.notebook?.folders.count ?? 0, assets: backup.notebook?.assets.count ?? 0, versions: backup.notebook?.history.count ?? 0, hasPreferences: backup.extras != nil, customTemplates: backup.extras?.customTemplates.count ?? 0)
+    }
+    public static func backupExtras(_ data: Data) throws -> BackupExtras? {
+        try validatedBackup(data).extras
+    }
+    public func importBackup(_ data: Data) throws -> ImportResult {
+        let backup = try Self.validatedBackup(data)
         return try transaction {
             let existing = try read("entries", as: Entry.self)
             let entryIDs = Set(existing.map(\.id))
@@ -292,11 +327,18 @@ public final class JournalStore {
             return result
         } catch { try? execute("ROLLBACK"); throw error }
     }
-    public func exportBackup() throws -> Data {
-        let value = Backup(formatVersion: 5, entries: try read("entries", as: Entry.self), reports: try read("reports", as: Report.self), summaries: try read("range_summaries", as: RangeSummary.self), notebook: try notebookSnapshot())
+    public func exportBackup(extras: BackupExtras? = nil) throws -> Data {
+        try extras?.validate()
+        let value = try transaction(beginSQL: "BEGIN DEFERRED") {
+            Backup(formatVersion: extras == nil ? 6 : 7, entries: try read("entries", as: Entry.self), reports: try read("reports", as: Report.self), summaries: try read("range_summaries", as: RangeSummary.self), notebook: try notebookSnapshot(), extras: extras?.canonicalized())
+        }
+        // Release the consistent-read transaction before large JSON serialization, so
+        // the UI connection can commit autosaves while the background encoder works.
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try encoder.encode(value)
     }
+    /// Changes made by other connections; the backup worker uses this to avoid repeated large exports.
+    func backupChangeToken() throws -> Int { try scalar("PRAGMA data_version") }
     public func entries() throws -> [Entry] {
         try read("entries", as: Entry.self).filter { $0.deletedAt == nil }.sorted { $0.createdAt > $1.createdAt }
     }
@@ -321,14 +363,14 @@ public final class JournalStore {
             try execute("DELETE FROM entries WHERE id=?", values: [id.uuidString])
         }
     }
-    private func validateSummary(_ summary: RangeSummary) throws {
-        try validateDay(summary.startDay); try validateDay(summary.endDay)
+    private static func validateSummary(_ summary: RangeSummary) throws {
+        try Self.validateDay(summary.startDay); try Self.validateDay(summary.endDay)
         guard summary.startDay <= summary.endDay, !summary.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw JournalError.invalid("总结日期范围或内容无效。")
         }
     }
     public func saveSummary(_ summary: RangeSummary) throws {
-        try validateSummary(summary)
+        try Self.validateSummary(summary)
         try execute("INSERT INTO range_summaries(id,payload) VALUES(?,?)", values: [summary.id.uuidString, try payload(summary)])
     }
     public func allSummaries() throws -> [RangeSummary] {
@@ -339,13 +381,13 @@ public final class JournalStore {
         try allSummaries().filter { $0.startDay == startDay && $0.endDay == endDay }
     }
     public func reportEntries(day: String) throws -> [Entry] { try entries().filter { $0.day == day && $0.inReport }.sorted { $0.createdAt < $1.createdAt } }
-    private func validateDay(_ day: String) throws {
+    private static func validateDay(_ day: String) throws {
         let formatter = DateFormatter(); formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"; formatter.isLenient = false
         guard let date = formatter.date(from: day), formatter.string(from: date) == day else { throw JournalError.invalid("日期格式应为 yyyy-MM-dd，例如 2026-10-30") }
     }
     public func saveReport(_ report: Report) throws {
-        try validateDay(report.day)
+        try Self.validateDay(report.day)
         guard !report.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw JournalError.invalid("日报内容为空") }
         try execute("INSERT INTO reports(id,payload) VALUES(?,?)", values: [report.id.uuidString, try payload(report)])
     }

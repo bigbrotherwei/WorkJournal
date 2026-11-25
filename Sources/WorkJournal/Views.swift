@@ -11,6 +11,7 @@ struct CaptureView: View {
     @ObservedObject private var reminders: ReminderCoordinator
     init(app: AppModel, close: @escaping () -> Void = {}) { self.app = app; self.close = close; self.reminders = app.reminders }
     @ViewState private var showingCaptureCalendar = false
+    @ViewState private var showingTemplates = false
     @ViewState private var showingSchedule = false
     var body: some View {
         VStack(spacing: 0) {
@@ -24,6 +25,7 @@ struct CaptureView: View {
                 HStack {
                     Label("随手记录", systemImage: "pencil.line").font(.system(size: 12, weight: .semibold)).foregroundStyle(JournalTheme.accent)
                     Spacer()
+                    Button { showingTemplates = true } label: { Label("模板", systemImage: "square.on.square") }
                     Label("本机保存", systemImage: "lock.shield").font(.caption).foregroundStyle(.secondary)
                 }
                 InlineRecordEditor(text: app.draft, images: app.draftImages,
@@ -87,6 +89,7 @@ struct CaptureView: View {
         }.frame(minWidth: 580, minHeight: 520).background(JournalPageBackground())
             .buttonStyle(JournalSecondaryButtonStyle()).tint(JournalTheme.accent)
             .onAppear { showingSchedule = app.draftDueAt != nil }
+            .sheet(isPresented: $showingTemplates) { TemplatePickerView { markdown in app.replaceDraftContent(ContentTemplates.appending(markdown, to: app.draft), images: app.draftImages) } }
     }
     private func shiftCaptureDay(_ amount: Int) {
         if let next = Calendar(identifier: .gregorian).date(byAdding: .day, value: amount, to: app.draftDate) {
@@ -98,6 +101,10 @@ struct CaptureView: View {
 struct MainView: View {
     @ObservedObject var app: AppModel
     @ViewState private var section = "记录"
+    @ViewState private var showingSearch = false
+    @ViewState private var pendingSearchResult: UnifiedSearchResult?
+    @ViewState private var searchEntry: Entry?
+    @ViewState private var searchReport: SearchReportPreview?
     @AppStorage("main.sidebarHidden") private var sidebarHidden = false
     var capture: () -> Void
     private let sections = [["记录", "待办"], ["日报", "周报"], ["笔记本"], ["回收站", "设置"]]
@@ -150,6 +157,7 @@ struct MainView: View {
                 HStack {
                     Button { sidebarHidden.toggle() } label: { Label(sidebarHidden ? "展开导航" : "收起导航", systemImage: "sidebar.left") }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
                     Spacer()
+                    Button { showingSearch = true } label: { Label("搜索全部 · ⌘K", systemImage: "magnifyingglass") }.keyboardShortcut("k", modifiers: .command)
                 }.padding(.horizontal, 20).padding(.vertical, 8)
                 Divider().overlay(JournalTheme.border)
                 Group {
@@ -172,8 +180,27 @@ struct MainView: View {
         }
         .tint(JournalTheme.accent).buttonStyle(JournalSecondaryButtonStyle())
         .frame(minWidth: 900, minHeight: 640)
+        .sheet(isPresented: $showingSearch, onDismiss: openSearchSelection) { GlobalSearchHost(app: app) { pendingSearchResult = $0; showingSearch = false } }
+        .sheet(item: $searchEntry) { EntryEditor(app: app, entry: $0) }
+        .sheet(item: $searchReport) { SearchReportPreviewView(report: $0) }
         .onChange(of: app.navigationTarget) { _, value in if let value { navigate(value); app.navigationTarget = nil } }
         .alert("操作未完成", isPresented: Binding(get: { app.error != nil }, set: { if !$0 { app.error = nil } })) { Button("知道了") { app.error = nil } } message: { Text(app.error ?? "") }
+    }
+    private func openSearchSelection() {
+        guard let result = pendingSearchResult else { return }
+        pendingSearchResult = nil
+        Task { @MainActor in
+            await Task.yield()
+            switch result.kind {
+            case .note: app.openSourceNote(result.ownerID, find: result.isOCRMatch ? "" : result.query)
+            case .record, .task:
+                if let entry = app.entries.first(where: { $0.id == result.ownerID }) { searchEntry = entry }
+                else { app.error = "这条记录已被删除，请重新搜索。" }
+            case .dailyReport, .rangeSummary:
+                do { searchReport = try app.savedSearchReport(result); if searchReport == nil { app.error = "这个版本已不存在，请重新搜索。" } }
+                catch { app.error = error.localizedDescription }
+            }
+        }
     }
     private func navigate(_ target: String) {
         guard target != section else { return }
@@ -187,6 +214,7 @@ struct EntryEditor: View {
     @ObservedObject var app: AppModel
     @ViewState var entry: Entry
     private let original: Entry
+    @ViewState private var showingTemplates = false
     @ObservedObject private var reminders: ReminderCoordinator
     @Environment(\.dismiss) private var dismiss
     @ViewState private var confirmDiscard = false
@@ -196,7 +224,7 @@ struct EntryEditor: View {
     private var dirty: Bool { entry != original }
     var body: some View {
         VStack(spacing: 0) {
-            HStack { JournalSymbol(name: "pencil", tone: .violet, size: 40); PageHeading(title: "编辑记录", subtitle: "修改后保存，记录才会更新。"); Spacer() }.padding(24)
+            HStack { JournalSymbol(name: "pencil", tone: .violet, size: 40); PageHeading(title: "编辑记录", subtitle: "修改后保存，记录才会更新。"); Spacer(); Button("插入模板") { showingTemplates = true } }.padding(24)
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     InlineRecordEditor(text: entry.text, images: entry.images, changed: { entry.text = $0; entry.images = $1 }, onError: { app.error = $0 }).frame(height: 230).journalCard(padding: 16)
@@ -227,6 +255,7 @@ struct EntryEditor: View {
             if let error = app.error { Text(error).foregroundStyle(.red).font(.caption).padding(.horizontal, 24).padding(.bottom, 12) }
         }.frame(width: 620, height: 610).background(JournalTheme.canvas)
             .buttonStyle(JournalSecondaryButtonStyle()).tint(JournalTheme.accent)
+            .sheet(isPresented: $showingTemplates) { TemplatePickerView { entry.text = ContentTemplates.appending($0, to: entry.text) } }
             .interactiveDismissDisabled(dirty)
             .confirmationDialog("放弃尚未保存的修改？", isPresented: $confirmDiscard) {
                 Button("放弃修改", role: .destructive) { dismiss() }
@@ -241,6 +270,8 @@ struct ReportView: View {
     @ViewState private var text = ""
     @ViewState private var candidate: Report?
     @ViewState private var baselineFingerprint: String?
+    @ViewState private var provenance: ReportProvenance?
+    @ViewState private var showingMaterials = false
     @ViewState private var savedFingerprint: String?
     @ViewState private var versions: [Report] = []
     @ViewState private var loadedDay = Days.key(Date())
@@ -278,7 +309,7 @@ struct ReportView: View {
             }
             Text("选中日期的日报素材将整理到下方，生成后可继续编辑。").font(.caption).foregroundStyle(.secondary)
             HStack {
-                Label("\(app.entries.filter { $0.day == loadedDay && $0.inReport }.count) 条日报素材", systemImage: "doc.on.doc").font(.callout).foregroundStyle(JournalTheme.accent)
+                Button { showingMaterials = true } label: { Label("\(app.entries.filter { $0.day == loadedDay && $0.inReport }.count) 条日报素材", systemImage: "doc.on.doc") }.font(.callout)
                 Spacer()
                 Button(app.reportQueued ? "日报已排队" : "生成日报") { app.generate(day: loadedDay) { candidate = $0 } }.buttonStyle(JournalPrimaryButtonStyle()).disabled((app.busy && !app.isClassifying) || app.checkingModels || app.reportQueued || app.model.isEmpty)
                 Menu("历史版本（\(versions.count)）") {
@@ -316,7 +347,7 @@ struct ReportView: View {
                         TextEditor(text: Binding(get: { text }, set: { text = $0; persistDraft() })).font(.system(size: 14)).lineSpacing(7).scrollContentBackground(.hidden)
                             .accessibilityLabel("编辑 Markdown 日报")
                     } else if !text.isEmpty {
-                        MarkdownPreview(source: text)
+                        MarkdownPreview(source: text, provenance: provenance)
                     } else {
                         VStack { Spacer(); Button("开始书写") { editingMarkdown = true }.buttonStyle(JournalPrimaryButtonStyle()); Spacer() }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -342,6 +373,7 @@ struct ReportView: View {
             ReportArchiveView(app: app) { archiveSelection = $0 }
         }
         .sheet(isPresented: $showingExport) { ReportExportView(app: app, initialDate: date) }
+        .sheet(isPresented: $showingMaterials) { ReportMaterialsView(entries: app.entries, startDay: loadedDay, endDay: loadedDay, includeAll: false) }
         .onAppear { load(day) }
         .onChange(of: date) { _, _ in
             showingDatePicker = false
@@ -358,21 +390,21 @@ struct ReportView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("候选版本预览").font(.title2.bold())
                 Text("采用后会替换编辑区内容；当前内容若有修改，将先保存为历史版本。").foregroundStyle(.secondary)
-                MarkdownPreview(source: candidate?.text ?? "").journalCard(padding: 18)
+                MarkdownPreview(source: candidate?.text ?? "", provenance: candidate?.provenance).journalCard(padding: 18)
                 HStack { Button("保留当前内容") { candidate = nil }; Spacer(); Button("采用候选版本") {
                     if hasChanges && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !save() { return }
-                    if let candidate { text = candidate.text; baselineFingerprint = candidate.sourceFingerprint }; candidate = nil; persistDraft()
+                    if let candidate { text = candidate.text; baselineFingerprint = candidate.sourceFingerprint; provenance = candidate.provenance }; candidate = nil; persistDraft()
                 }.buttonStyle(JournalPrimaryButtonStyle()) }
             }.padding(24).frame(width: 650, height: 500).background(JournalTheme.canvas).buttonStyle(JournalSecondaryButtonStyle())
         }
         .onDisappear { if hasChanges && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { save() } }
     }
     @discardableResult private func save() -> Bool {
-        guard app.saveReport(day: loadedDay, text: text, sourceFingerprint: baselineFingerprint) else { return false }
+        guard app.saveReport(day: loadedDay, text: text, sourceFingerprint: baselineFingerprint, provenance: provenance) else { return false }
         savedText = text; savedFingerprint = baselineFingerprint; clearDraft(); versions = app.versions(day: loadedDay); return true
     }
     private func persistDraft() {
-        let draft = ReportDraft(text: text, sourceFingerprint: baselineFingerprint)
+        let draft = ReportDraft(text: text, sourceFingerprint: baselineFingerprint, provenance: provenance)
         if let data = try? JSONEncoder().encode(draft) { UserDefaults.standard.set(data, forKey: "reportDraftV2." + loadedDay) }
     }
     private func clearDraft() {
@@ -390,7 +422,7 @@ struct ReportView: View {
             cached = ReportDraft(text: legacy, sourceFingerprint: nil)
         }
         let content = ReportDisplay.content(saved: versions.first, draft: cached)
-        text = content.text; baselineFingerprint = content.sourceFingerprint
+        text = content.text; baselineFingerprint = content.sourceFingerprint; provenance = content.provenance
     }
     private func shiftDay(_ amount: Int) {
         if let next = Calendar(identifier: .gregorian).date(byAdding: .day, value: amount, to: date) { date = next }
@@ -461,7 +493,21 @@ struct SettingsView: View {
             SettingsSection(title: "快捷记录", symbol: "keyboard", tone: .violet) { ShortcutSettings(app: app) }
             SettingsSection(title: "分类管理", symbol: "square.grid.2x2", tone: .peach) { CategoryManager(app: app) }
             SettingsSection(title: "待办提醒", symbol: "bell", tone: .blue) { ReminderSettingsView(coordinator: app.reminders) }
-            SettingsSection(title: "数据", symbol: "internaldrive", tone: .neutral) { Button("导出完整 JSON 备份", action: app.exportBackup); Button("从备份合并恢复", action: app.importBackup).disabled(app.busy); Text("数据保存在 Application Support/WorkJournal。备份包含记录、回收站、日报、周报、笔记与附件，请妥善保管。").font(.caption).foregroundStyle(.secondary) }
+            if let coordinator = app.backupCoordinator {
+                SettingsSection(title: "自动备份", symbol: "externaldrive.badge.timemachine", tone: .mint) { BackupSettingsSummaryView(coordinator: coordinator) }
+            }
+            if let coordinator = app.ocrCoordinator {
+                SettingsSection(title: "图片文字搜索", symbol: "text.viewfinder", tone: .blue) { OCRSettingsView(coordinator: coordinator) }
+            }
+            SettingsSection(title: "数据", symbol: "internaldrive", tone: .neutral) {
+                HStack {
+                    Button("导出完整 JSON 备份", action: app.exportBackup).disabled(app.backupTransferBusy)
+                    Button("从备份合并恢复", action: app.importBackup).disabled(app.busy || app.backupTransferBusy)
+                    if app.backupTransferBusy { ProgressView().controlSize(.small); Text("正在处理备份…").font(.caption).foregroundStyle(.secondary) }
+                }
+                Text("备份包含已保存的资料、笔记历史、应用设置和自定义模板。恢复时可选择是否恢复设置；本机备份目录保留，未保存的草稿不在备份中。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }.padding(26)
         }
         }.frame(maxWidth: 960).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

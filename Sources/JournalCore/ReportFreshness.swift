@@ -16,5 +16,6 @@ public enum ReportFreshness {
 public struct ReportDraft: Codable {
     public var text: String
     public var sourceFingerprint: String?
-    public init(text: String, sourceFingerprint: String?) { self.text = text; self.sourceFingerprint = sourceFingerprint }
+    public var provenance: ReportProvenance?
+    public init(text: String, sourceFingerprint: String?, provenance: ReportProvenance? = nil) { self.text = text; self.sourceFingerprint = sourceFingerprint; self.provenance = provenance }
 }

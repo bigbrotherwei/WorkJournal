@@ -1,6 +1,11 @@
 import Foundation
 import CSQLite
 
+struct NotebookSaveValidationStamp: Equatable {
+    let dataVersion: Int32
+    let totalChanges: Int64
+}
+
 extension JournalStore {
     public func noteFolders(includeDeleted: Bool = false) throws -> [NoteFolder] {
         try read("note_folders", as: NoteFolder.self).filter { includeDeleted || $0.deletedAt == nil }
@@ -17,10 +22,37 @@ extension JournalStore {
         try readNoteAssets(whereSQL: " WHERE id=?", value: id.uuidString).first
     }
     public func notebookSnapshot() throws -> NotebookSnapshot {
-        NotebookSnapshot(folders: try noteFolders(includeDeleted: true), notes: try notes(includeDeleted: true), assets: try readNoteAssets())
+        NotebookSnapshot(folders: try noteFolders(includeDeleted: true), notes: try notes(includeDeleted: true), assets: try readNoteAssets(), history: try read("note_history", as: NoteVersion.self).sorted { $0.id.uuidString < $1.id.uuidString })
     }
     /// Reads JSON metadata only. This path never fetches the asset BLOB column.
     private func assetMetadata() throws -> [NoteAsset] { try read("note_assets", as: NoteAsset.self) }
+    private func assetMetadata(noteID: UUID) throws -> [NoteAsset] {
+        try withStatement("SELECT payload FROM note_assets WHERE owner_note_id=?") { statement in
+            try bind(noteID.uuidString, at: 1, statement: statement)
+            var assets: [NoteAsset] = []
+            while true {
+                let status = sqlite3_step(statement)
+                if status == SQLITE_DONE { return assets }
+                guard status == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { throw failure() }
+                assets.append(try JSONDecoder().decode(NoteAsset.self, from: Data(String(cString: text).utf8)))
+            }
+        }
+    }
+    private func storedNote(id: UUID) throws -> NoteDocument? {
+        try withStatement("SELECT payload FROM notes WHERE id=?") { statement in
+            try bind(id.uuidString, at: 1, statement: statement)
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return nil }
+            guard status == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { throw failure() }
+            return try JSONDecoder().decode(NoteDocument.self, from: Data(String(cString: text).utf8))
+        }
+    }
+    private func currentNotebookValidationStamp() throws -> NotebookSaveValidationStamp {
+        try withStatement("PRAGMA data_version") { statement in
+            guard sqlite3_step(statement) == SQLITE_ROW else { throw failure() }
+            return NotebookSaveValidationStamp(dataVersion: sqlite3_column_int(statement, 0), totalChanges: sqlite3_total_changes64(sqlite3_db_handle(statement)))
+        }
+    }
     private func readNoteAssets(whereSQL: String = "", value: String? = nil, cancelled: () -> Bool = { false }) throws -> [NoteAsset] {
         try checkNotebookCancellation(cancelled)
         return try withStatement("SELECT payload,data FROM note_assets\(whereSQL) ORDER BY id") { statement in
@@ -48,7 +80,7 @@ extension JournalStore {
     private func persistFolder(_ folder: NoteFolder) throws {
         try execute("INSERT INTO note_folders(id,payload) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", values: [folder.id.uuidString, try payload(folder)])
     }
-    private func persistNote(_ note: NoteDocument) throws {
+    func persistNote(_ note: NoteDocument) throws {
         try execute("INSERT INTO notes(id,payload) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", values: [note.id.uuidString, try payload(note)])
     }
     private func persistAsset(_ asset: NoteAsset) throws {
@@ -76,23 +108,36 @@ extension JournalStore {
             try persistFolder(folder)
         }
     }
-    @discardableResult public func saveNote(_ proposed: NoteDocument, expectedRevision: Int? = nil) throws -> NoteDocument {
-        try transaction {
-            var allNotes = try notes(includeDeleted: true)
-            let current = allNotes.first { $0.id == proposed.id }
+    @discardableResult public func saveNote(_ proposed: NoteDocument, expectedRevision: Int? = nil, now: Date = Date()) throws -> NoteDocument {
+        let result = try transaction {
+            // BEGIN IMMEDIATE keeps external writers out until validation and persistence finish.
+            // Any other local write or external connection change requires full validation again.
+            let stamp = try currentNotebookValidationStamp()
+            let canReuseValidation = notebookSaveValidationStamp == stamp
+            let current = try storedNote(id: proposed.id)
             if let expectedRevision, expectedRevision != (current?.revision ?? 0) { throw JournalError.invalid("笔记已被其他编辑更新，请保留草稿并重新载入。") }
             if let current {
                 guard current.deletedAt == proposed.deletedAt, current.deletionBatchID == proposed.deletionBatchID else { throw JournalError.invalid("笔记已删除或删除状态已变化，请从回收站恢复。") }
             }
             var note = proposed
-            note.updatedAt = Date()
+            note.updatedAt = now
             guard (current?.revision ?? 0) < Int.max else { throw JournalError.invalid("笔记修订号已达到上限。") }
             note.revision = (current?.revision ?? 0) + 1
-            allNotes.removeAll { $0.id == note.id }; allNotes.append(note)
-            try NotebookValidation.validateGraph(folders: try noteFolders(includeDeleted: true), notes: allNotes, assets: try assetMetadata())
+            if canReuseValidation {
+                try NotebookValidation.validateGraph(folders: try noteFolders(includeDeleted: true), notes: [note], assets: try assetMetadata(noteID: note.id))
+            } else {
+                var allNotes = try notes(includeDeleted: true)
+                allNotes.removeAll { $0.id == note.id }; allNotes.append(note)
+                try NotebookValidation.validateGraph(folders: try noteFolders(includeDeleted: true), notes: allNotes, assets: try assetMetadata())
+            }
+            if let current { try captureAutomaticVersion(current, replacing: note, now: now) }
             try persistNote(note)
-            return note
+            return (note, try currentNotebookValidationStamp())
         }
+        // Only a committed transaction can become the baseline for a later save. Capture the
+        // stamp inside the transaction so an external write after COMMIT cannot be absorbed.
+        notebookSaveValidationStamp = result.1
+        return result.0
     }
     public func saveNoteAsset(_ asset: NoteAsset) throws {
         try transaction {
@@ -101,6 +146,10 @@ extension JournalStore {
             var assets = try assetMetadata()
             if let index = assets.firstIndex(where: { $0.id == asset.id }) {
                 guard assets[index].ownerNoteID == asset.ownerNoteID else { throw JournalError.invalid("资源 ID 已属于其他笔记。") }
+                if try noteHistory(noteID: asset.ownerNoteID).contains(where: { $0.markdown.range(of: asset.reference, options: .caseInsensitive) != nil }),
+                   try noteAsset(id: asset.id)?.data != asset.data {
+                    throw JournalError.invalid("此资源仍被历史版本引用，请保存为新资源，避免改变旧版本。")
+                }
                 assets[index] = asset
             } else { assets.append(asset) }
             try NotebookValidation.validateGraph(folders: try noteFolders(includeDeleted: true), notes: try notes(includeDeleted: true), assets: assets)
@@ -173,6 +222,7 @@ extension JournalStore {
         }
     }
     private func removeNote(id: UUID) throws {
+        try execute("DELETE FROM note_history WHERE note_id=?", values: [id.uuidString])
         try execute("DELETE FROM note_assets WHERE owner_note_id=?", values: [id.uuidString])
         try execute("DELETE FROM notes WHERE id=?", values: [id.uuidString])
     }
@@ -193,6 +243,7 @@ extension JournalStore {
     public func importNotebook(_ snapshot: NotebookSnapshot, cancelled: () -> Bool = { false }) throws -> NotebookImportResult {
         try checkNotebookCancellation(cancelled)
         try NotebookValidation.validate(snapshot, cancelled: cancelled)
+        try NotebookHistoryPolicy.validate(snapshot.history, notes: snapshot.notes, assets: snapshot.assets)
         try checkNotebookCancellation(cancelled)
         return try transaction {
             let result = try mergeNotebook(snapshot, deduplicateSource: true, cancelled: cancelled)
@@ -250,6 +301,22 @@ extension JournalStore {
         for folder in folders { try checkNotebookCancellation(cancelled); try persistFolder(folder) }
         for note in notes { try checkNotebookCancellation(cancelled); try persistNote(note) }
         for asset in assets { try checkNotebookCancellation(cancelled); try persistAsset(asset) }
+        let mergedNoteIDs = noteIDs.union(addedNoteIDs)
+        let localVersionIDs = Set(try read("note_history", as: NoteVersion.self).map(\.id))
+        let versions = prepared.history.filter { mergedNoteIDs.contains($0.noteID) && !localVersionIDs.contains($0.id) }
+        let historyOwners = Set(versions.map(\.noteID))
+        for asset in prepared.assets where historyOwners.contains(asset.ownerNoteID) && localAssetByID[asset.id] != nil {
+            if versions.contains(where: { $0.noteID == asset.ownerNoteID && $0.markdown.range(of: asset.reference, options: .caseInsensitive) != nil }),
+               let existing = try noteAsset(id: asset.id), existing.data != asset.data {
+                throw JournalError.invalid("备份历史资源与本机同 ID 文件内容冲突，未修改数据。")
+            }
+        }
+        // History can recover prior content for an existing note without replacing its current body.
+        for asset in prepared.assets where historyOwners.contains(asset.ownerNoteID) && !addedNoteIDs.contains(asset.ownerNoteID) && localAssetByID[asset.id] == nil {
+            try checkNotebookCancellation(cancelled); try persistAsset(asset)
+        }
+        for version in versions { try checkNotebookCancellation(cancelled); try persistNoteVersion(version) }
+        for id in historyOwners { try pruneNoteHistory(noteID: id) }
         try checkNotebookCancellation(cancelled)
         let skipped = incoming.folders.count + incoming.notes.count + incoming.assets.count - folders.count - notes.count - assets.count
         let dependent = prepared.folders.filter { !folderIDs.contains($0.id) && blocked.contains($0.id) }.count + prepared.notes.filter { !noteIDs.contains($0.id) && $0.folderID.map(blocked.contains) == true }.count
@@ -309,7 +376,7 @@ extension JournalStore {
             notes.append(note)
         }
         let keptNoteIDs = Set(keptNotes.map(\.id))
-        return NotebookSnapshot(folders: folders, notes: notes, assets: incoming.assets.filter { keptNoteIDs.contains($0.ownerNoteID) })
+        return NotebookSnapshot(folders: folders, notes: notes, assets: incoming.assets.filter { keptNoteIDs.contains($0.ownerNoteID) }, history: incoming.history.filter { keptNoteIDs.contains($0.noteID) })
     }
 
     private func selectedNoteRows(ids: Set<UUID>, cancelled: () -> Bool) throws -> [NoteDocument] {

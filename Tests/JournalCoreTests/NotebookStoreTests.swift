@@ -476,10 +476,10 @@ struct NotebookStoreTests {
         try fixture { store, root in
             let entry = Entry(text: "Synthetic legacy", day: "2026-11-11"); try store.save(entry)
             let url = root.appendingPathComponent("journal.sqlite")
-            _ = try sql(url, "DROP TABLE note_assets"); _ = try sql(url, "DROP TABLE notes"); _ = try sql(url, "DROP TABLE note_folders")
+            _ = try sql(url, "DROP TABLE note_history"); _ = try sql(url, "DROP TABLE note_assets"); _ = try sql(url, "DROP TABLE notes"); _ = try sql(url, "DROP TABLE note_folders")
             _ = try sql(url, "PRAGMA user_version=4")
             let migrated = try JournalStore(url: url)
-            #expect(try sql(url, "PRAGMA user_version") == 5)
+            #expect(try sql(url, "PRAGMA user_version") == 6)
             let backup = try #require(migrated.migrationBackupURL)
             #expect(try sql(backup, "PRAGMA user_version") == 4)
             #expect(try migrated.entries() == [entry])

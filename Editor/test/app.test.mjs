@@ -61,3 +61,120 @@ test('format disclosure preserves selected text and advanced commands keep undo 
   document.querySelector('#toolbar-advanced [data-command=blockquote]').click();assert.match((await app.flush(payload)).markdown,/^> Plain/);
   document.querySelector('#toolbar-main [data-command=undo]').click();assert.equal((await app.flush(payload)).markdown,'Plain');
 });
+test('reading and font changes preserve exact source and lock both surfaces',async()=>{
+  app.initialize(payload);assert.equal(typeof app.setReading,'function');await app.setReading(true);
+  assert.equal(document.querySelector('.tiptap').getAttribute('contenteditable'),'false');
+  await app.command('bold');await app.command('source');assert.equal(document.getElementById('source').readOnly,true);
+  app.setFontSize(20);assert.equal(document.documentElement.style.getPropertyValue('--editor-font-size'),'20px');
+  await assert.rejects(()=>app.insertMarkdown('blocked'),/阅读/);assert.equal((await app.flush(payload)).markdown,payload.markdown);
+  await app.setReading(false);
+});
+test('find highlights body and outline jump and replace preserve undo without full reload',async()=>{
+  app.initialize({...payload,markdown:'# 第一章\n\n**中文** 中文'});assert.equal(typeof app.find,'function');
+  assert.equal(app.find('中文').count,2);assert.equal(document.querySelectorAll('.search-match').length,2);
+  assert.equal(app.outline()[0].text,'第一章');app.jumpToHeading(app.outline()[0].position);
+  assert.equal(app.replace('中文','完成',true),2);assert.match((await app.flush(payload)).markdown,/\*\*完成\*\* 完成/);
+  app.command('undo');assert.match((await app.flush(payload)).markdown,/\*\*中文\*\* 中文/);
+});
+test('template insertion waits for IME and appends preserving source and one undo',async()=>{
+  app.initialize({...payload,markdown:'Existing'});await app.command('source');const source=document.getElementById('source');
+  source.dispatchEvent(new window.CompositionEvent('compositionstart'));source.value='Existing 中文';source.dispatchEvent(new window.Event('input'));
+  let done=false;const insertion=app.insertMarkdown('# Template').then(()=>done=true);await new Promise(r=>setTimeout(r,20));assert.equal(done,false);
+  source.dispatchEvent(new window.CompositionEvent('compositionend'));await insertion;assert.equal((await app.flush(payload)).markdown,'Existing 中文\n\n# Template');
+  app.command('undo');assert.equal((await app.flush(payload)).markdown,'Existing 中文');
+});
+test('selection extraction returns only selected text, and stale insertion cannot enter new note',async()=>{
+  app.initialize({...payload,markdown:'Before selection'});await app.command('source');const source=document.getElementById('source');source.setSelectionRange(7,16);
+  assert.equal(await app.selectedText(),'selection');
+  source.dispatchEvent(new window.CompositionEvent('compositionstart'));const insertion=app.insertMarkdown('stale');
+  app.initialize({...payload,sessionID:'33333333-3333-4333-8333-333333333333',markdown:'Next'});
+  await assert.rejects(()=>insertion,/会话/);assert.equal((await app.flush({...payload,sessionID:'33333333-3333-4333-8333-333333333333'})).markdown,'Next');
+});
+test('format controls cannot change composing text and unchanged source roundtrip retains undo',async()=>{
+  app.initialize({...payload,markdown:'Keep'});const editable=document.querySelector('.tiptap');
+  editable.dispatchEvent(new window.CompositionEvent('compositionstart',{bubbles:true}));
+  document.querySelector('[data-command=blockquote]').click();
+  editable.dispatchEvent(new window.CompositionEvent('compositionend',{bubbles:true}));
+  await new Promise(r=>setTimeout(r,10));assert.equal((await app.flush(payload)).markdown,'Keep');
+  app.command('blockquote');await app.command('source');await app.command('document');app.command('undo');
+  assert.equal((await app.flush(payload)).markdown,'Keep');
+});
+test('case-insensitive find selects the actual matched text and source replacement keeps surrounding content',async()=>{
+  app.initialize({...payload,markdown:'Before HELLO after Hello tail'});
+  assert.equal(app.find('hello').count,2);assert.equal(await app.selectedText(),'HELLO');
+  app.find('hello',1);assert.equal(await app.selectedText(),'Hello');
+  await app.command('source');assert.equal(app.find('hello').count,2);assert.equal(await app.selectedText(),'HELLO');
+  app.find('hello',1);assert.equal(await app.selectedText(),'Hello');
+  assert.equal(app.replace('hello','Done'),1);assert.equal((await app.flush(payload)).markdown,'Before HELLO after Done tail');
+  app.command('undo');assert.equal((await app.flush(payload)).markdown,'Before HELLO after Hello tail');
+});
+test('source edits remain undoable and redoable after switching either direction',async()=>{
+  app.initialize({...payload,markdown:'Before'});await app.command('source');const source=document.getElementById('source');
+  source.value='After';source.dispatchEvent(new window.Event('input'));await app.command('document');
+  app.command('undo');assert.equal((await app.flush(payload)).markdown,'Before');
+  await app.command('source');app.command('redo');assert.equal((await app.flush(payload)).markdown,'After');
+  await app.command('document');await app.command('source');app.command('undo');assert.equal((await app.flush(payload)).markdown,'Before');
+});
+test('cross-mode history preserves exact source, rich marks and assets in chronological order',async()=>{
+  const original='# Exact  \n\nBefore **bold** ![image](workjournal-asset://'+noteID+'/44444444-4444-4444-8444-444444444444)\n';
+  app.initialize({...payload,markdown:original});await app.command('source');const source=document.getElementById('source');
+  const changed=original.replace('Before','After');source.value=changed;source.dispatchEvent(new window.Event('input'));await app.command('document');
+  app.replace('After','Latest');await app.command('source');app.command('undo');assert.equal((await app.flush(payload)).markdown,changed);
+  app.command('undo');assert.equal((await app.flush(payload)).markdown,original);
+  await app.command('document');app.command('redo');assert.equal((await app.flush(payload)).markdown,changed);
+  app.command('redo');const result=(await app.flush(payload)).markdown;assert.match(result,/Latest \*\*bold\*\*/);assert.match(result,/workjournal-asset:/);
+});
+test('source-only whitespace edits keep undo across repeated mode changes',async()=>{
+  app.initialize({...payload,markdown:'Before\n'});await app.command('source');const source=document.getElementById('source');
+  source.value='Before\n\n';source.dispatchEvent(new window.Event('input'));await app.command('document');await app.command('source');
+  app.command('undo');assert.equal((await app.flush(payload)).markdown,'Before\n');
+  app.command('redo');assert.equal((await app.flush(payload)).markdown,'Before\n\n');
+});
+test('empty and whitespace-only source edits undo exactly from the document surface',async()=>{
+  for(const original of ['', ' ', '\n\n', '\t\n']){
+    app.initialize({...payload,markdown:original});await app.command('source');const source=document.getElementById('source');
+    source.value=original+'\n';source.dispatchEvent(new window.Event('input'));await app.command('document');
+    app.command('undo');assert.equal((await app.flush(payload)).markdown,original);
+    await app.command('source');app.command('redo');assert.equal(source.value,original+'\n');
+    assert.equal((await app.flush(payload)).markdown,original+'\n');
+  }
+});
+test('source IME commits one reversible event across a pending mode change',async()=>{
+  app.initialize({...payload,markdown:'Before\n'});await app.command('source');const source=document.getElementById('source');
+  source.value='Before draft\n';source.dispatchEvent(new window.Event('input'));
+  source.dispatchEvent(new window.CompositionEvent('compositionstart'));
+  for(const value of ['Before draft 中','Before draft 中文\n']){source.value=value;source.dispatchEvent(new window.Event('input'));}
+  app.command('undo');assert.equal(source.value,'Before draft 中文\n');
+  let switched=false;const switching=app.command('document').then(()=>{switched=true;});
+  await new Promise(resolve=>setTimeout(resolve,10));assert.equal(switched,false);
+  source.dispatchEvent(new window.CompositionEvent('compositionend'));await switching;
+  assert.equal((await app.flush(payload)).markdown,'Before draft 中文\n');
+  app.command('undo');assert.equal((await app.flush(payload)).markdown,'Before draft\n');
+  await app.command('source');app.command('undo');assert.equal(source.value,'Before\n');
+  app.command('redo');app.command('redo');assert.equal((await app.flush(payload)).markdown,'Before draft 中文\n');
+});
+test('a divergent edit clears shared redo and opening another note clears shared undo',async()=>{
+  app.initialize({...payload,markdown:'Before'});await app.command('source');const source=document.getElementById('source');
+  source.value='After';source.dispatchEvent(new window.Event('input'));await app.command('document');
+  app.replace('After','Latest');app.command('undo');await app.command('source');app.command('undo');
+  assert.equal(source.value,'Before');source.value='Branch';source.dispatchEvent(new window.Event('input'));
+  await app.command('document');app.command('redo');assert.equal((await app.flush(payload)).markdown,'Branch');
+  app.command('undo');assert.equal((await app.flush(payload)).markdown,'Before');
+  const newer={...payload,sessionID:'33333333-3333-4333-8333-333333333333',markdown:'Next note'};
+  app.initialize(newer);app.command('undo');await app.command('source');app.command('redo');
+  assert.equal((await app.flush(newer)).markdown,'Next note');
+});
+test('image insertion and rich styles survive the shared source history in both directions',async()=>{
+  const original='<p><u>Before</u> <span style="color: red">rich</span></p>\n';
+  const reference=`workjournal-asset://${noteID}/44444444-4444-4444-8444-444444444444`;
+  app.initialize({...payload,markdown:original});await app.command('source');const source=document.getElementById('source');
+  const changed=original.replace('Before','After');source.value=changed;source.dispatchEvent(new window.Event('input'));await app.command('document');
+  app.command('image');const request=messages.findLast(message=>message.type==='pickImage');app.imageResult({...request,reference,alt:'synthetic'});
+  const withImage=(await app.flush(payload)).markdown;assert.ok(document.querySelector('.tiptap u'));assert.equal(document.querySelector('.tiptap img').getAttribute('src'),reference);
+  await app.command('source');app.replace('After','Latest');await app.command('document');app.command('undo');
+  assert.equal((await app.flush(payload)).markdown,withImage);app.command('undo');assert.equal((await app.flush(payload)).markdown,changed);
+  await app.command('source');app.command('undo');assert.equal(source.value,original);
+  app.command('redo');await app.command('document');app.command('redo');app.command('redo');
+  assert.equal(document.querySelector('.tiptap u').textContent,'Latest');assert.equal(document.querySelector('.tiptap img').getAttribute('src'),reference);
+  assert.equal(document.querySelector('.tiptap span[style]').style.color,'red');
+});

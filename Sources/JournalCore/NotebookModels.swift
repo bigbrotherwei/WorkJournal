@@ -50,7 +50,16 @@ public struct NotebookSnapshot: Codable, Equatable, Sendable {
     public var folders: [NoteFolder]
     public var notes: [NoteDocument]
     public var assets: [NoteAsset]
-    public init(folders: [NoteFolder] = [], notes: [NoteDocument] = [], assets: [NoteAsset] = []) { self.folders = folders; self.notes = notes; self.assets = assets }
+    public var history: [NoteVersion]
+    public init(folders: [NoteFolder] = [], notes: [NoteDocument] = [], assets: [NoteAsset] = [], history: [NoteVersion] = []) { self.folders = folders; self.notes = notes; self.assets = assets; self.history = history }
+    private enum CodingKeys: String, CodingKey { case folders, notes, assets, history }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        folders = try values.decode([NoteFolder].self, forKey: .folders)
+        notes = try values.decode([NoteDocument].self, forKey: .notes)
+        assets = try values.decode([NoteAsset].self, forKey: .assets)
+        history = try values.decodeIfPresent([NoteVersion].self, forKey: .history) ?? []
+    }
 }
 
 public struct NotebookImportResult: Codable, Equatable, Sendable {

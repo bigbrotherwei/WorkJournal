@@ -12,6 +12,7 @@ struct NotebookView: View {
     @AppStorage("notebook.listHidden") private var listHidden = false
     @ViewState private var action: NotebookAction?
     @ViewState private var showingTransfer = false
+    @ViewState private var showingTemplates = false
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
@@ -38,6 +39,11 @@ struct NotebookView: View {
             .onAppear { model.enter() }
             .sheet(item: $action) { NotebookActionSheet(model: model, action: $0) }
             .sheet(isPresented: $showingTransfer) { NotebookTransferView(model: model, backup: backup, restoreBackup: restoreBackup) }
+            .sheet(isPresented: $showingTemplates) { TemplatePickerView(onInsert: model.insertTemplate) }
+            .sheet(item: $model.historyNote) { note in
+                NotebookHistoryView(note: note, load: model.noteHistory, checkpoint: model.checkpointHistory,
+                                    restore: { try model.restoreHistory(versionID: $0, expectedRevision: $1) }, onRestored: model.didRestoreHistory)
+            }
             .sheet(item: $model.openedAsset) { NotebookAssetView(asset: $0) }
             .alert("笔记操作未完成", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button("知道了") { model.error = nil } } message: { Text(model.error ?? "") }
             .overlay(alignment: .bottom) {
@@ -140,12 +146,31 @@ struct NotebookView: View {
                         Text(model.path(of: note.folderID)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         Spacer()
                         Menu {
+                            Button("插入模板…") { showingTemplates = true }
+                            Button("从选中文字 / 摘要创建待办", action: model.createTaskFromSelection)
+                            Divider()
+                            Button("历史版本…", action: model.showHistory)
+                            Button("保存手动快照", action: model.checkpointCurrentNote)
+                            Divider()
                             Button("移动到…") { action = .moveNote(note) }
                             Button("移到回收站", role: .destructive) { model.deleteNote(note.id) }
                         } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).frame(width: 24)
                     }
-                    TextField("未命名笔记", text: Binding(get: { model.title }, set: model.changeTitle)).textFieldStyle(.plain).font(.system(size: 25, weight: .semibold, design: .rounded))
-                    HStack(spacing: 6) { Circle().fill(JournalTheme.accent).frame(width: 5, height: 5); Text(model.saveStatus).font(.system(size: 11)).foregroundStyle(.secondary) }
+                    NotebookTitleField(model: model, editor: model.editor)
+                    HStack(spacing: 10) {
+                        Button { showingTemplates = true } label: { Label("模板", systemImage: "doc.on.doc") }
+                        Button(action: model.createTaskFromSelection) { Label("创建待办", systemImage: "checkmark.circle") }.help("选中文字创建待办；未选择时使用笔记摘要")
+                        Button(action: model.showHistory) { Label("历史", systemImage: "clock.arrow.circlepath") }
+                    }.font(.caption).disabled(model.transitioning)
+                    HStack(spacing: 6) {
+                        switch model.saveState {
+                        case .saving: ProgressView().controlSize(.mini)
+                        case .saved: Image(systemName: "checkmark.circle.fill").foregroundStyle(JournalTheme.accent)
+                        case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        case .idle: Image(systemName: "circle").foregroundStyle(.secondary)
+                        }
+                        Text(model.saveStatus).foregroundStyle(model.saveState == .failed ? Color.orange : Color.secondary)
+                    }.font(.system(size: 11)).accessibilityElement(children: .combine)
                     if !note.tags.isEmpty { Text(note.tags.map { "#" + $0 }.joined(separator: "  ")).font(.caption).foregroundStyle(JournalTheme.accent).lineLimit(2) }
                     if !model.selectedAssets.filter({ $0.kind != .image }).isEmpty {
                         ScrollView(.horizontal) {
@@ -272,5 +297,14 @@ private struct NotebookMoveDrop: DropDelegate {
             Task { @MainActor in _ = model.handleDrop(text, destination: destination) }
         }
         return true
+    }
+}
+
+private struct NotebookTitleField: View {
+    @ObservedObject var model: NotebookModel
+    @ObservedObject var editor: NoteEditorController
+    var body: some View {
+        TextField("未命名笔记", text: Binding(get: { model.title }, set: model.changeTitle))
+            .textFieldStyle(.plain).font(.system(size: 25, weight: .semibold, design: .rounded)).disabled(editor.isReading)
     }
 }

@@ -15,6 +15,7 @@ struct RangeSummaryView: View {
     @ViewState private var startCalendar = false
     @ViewState private var endCalendar = false
     @ViewState private var showingHistory = false
+    @ViewState private var showingMaterials = false
     private var range: SummaryRange? { try? SummaryRange(startDay: Days.key(start), endDay: Days.key(end)) }
     private var key: String { "\(Days.key(start))_\(Days.key(end))_\(includeAll)" }
     private var candidate: RangeSummary? { drafts[key] }
@@ -52,6 +53,7 @@ struct RangeSummaryView: View {
                     if !(candidate?.text ?? "").isEmpty { replacePrompt = true } else { generate() }
                 }.buttonStyle(JournalPrimaryButtonStyle()).disabled(app.busy || range == nil)
             }
+            Button { showingMaterials = true } label: { Label("查看本次总结素材", systemImage: "doc.on.doc") }.disabled(range == nil)
             if range == nil { Text("结束日期不能早于开始日期。").foregroundStyle(.red) }
             VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -81,7 +83,7 @@ struct RangeSummaryView: View {
             Divider().overlay(JournalTheme.border)
             Group {
                 if preview {
-                    if let source = candidate?.text, !source.isEmpty { MarkdownPreview(source: source) }
+                    if let source = candidate?.text, !source.isEmpty { MarkdownPreview(source: source, provenance: candidate?.provenance) }
                     else {
                         VStack(spacing: 16) {
                             JournalSymbol(name: "book", tone: .peach, size: 54)
@@ -110,6 +112,7 @@ struct RangeSummaryView: View {
         }.padding(26).frame(maxWidth: 1050).frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { restore(); select(.currentWeek()); loadLatest() }
         .onChange(of: key) { _, _ in loadLatest() }
+        .sheet(isPresented: $showingMaterials) { ReportMaterialsView(entries: app.entries, startDay: Days.key(start), endDay: Days.key(end), includeAll: includeAll) }
         .sheet(isPresented: $showingHistory) {
             SummaryHistoryView(app: app, drafts: drafts, select: openHistory)
         }

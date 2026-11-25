@@ -14,6 +14,8 @@ import Superscript from '@tiptap/extension-superscript';
 import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
 import { common, createLowlight } from 'lowlight';
 import createDOMPurify from 'dompurify';
+import { workflowPlugins, MarkdownSourceStep, sourceKey } from './workflow.js';
+import { closeHistory } from '@tiptap/pm/history';
 
 export const MAX_TEXT = 8 * 1024 * 1024;
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -116,12 +118,26 @@ function escapedHTML(node) {
   return `<${tag}${attrs}>` + (['img','br','hr','input','col'].includes(tag) ? '' : Array.from(node.childNodes).map(escapedHTML).join('') + `</${tag}>`);
 }
 export function createEditor({markdown = '', noteID, element, onUpdate = () => {}, editorProps = {}}) {
-  const editor = new Editor({element,extensions:[PreservedBlock,PreservedHTML,PreservedInline,StarterKit.configure({codeBlock:false,link:{openOnClick:false,autolink:false,isAllowedUri:url=>!!safeURL(url,noteID)}}),Markdown,Image.configure({inline:true}),TableKit.configure({table:{resizable:false}}),TaskList,TaskItem.configure({nested:true}),TextStyle,Color,BackgroundColor,TextAlign.configure({types:['heading','paragraph']}),Highlight.configure({multicolor:true}),Subscript,Superscript,SafeCodeBlock.configure({lowlight:createLowlight(common)})], content:'',editorProps:{attributes:{'aria-label':'笔记正文',role:'textbox','aria-multiline':'true'},...editorProps,transformPastedHTML:html=>sanitizeHTML(html,noteID)}, onUpdate});
+  const Workflow = Extension.create({name:'notebookWorkflow',addProseMirrorPlugins(){return workflowPlugins(this.editor);}});
+  const editor = new Editor({element,extensions:[Workflow,PreservedBlock,PreservedHTML,PreservedInline,StarterKit.configure({codeBlock:false,link:{openOnClick:false,autolink:false,isAllowedUri:url=>!!safeURL(url,noteID)}}),Markdown,Image.configure({inline:true}),TableKit.configure({table:{resizable:false}}),TaskList,TaskItem.configure({nested:true}),TextStyle,Color,BackgroundColor,TextAlign.configure({types:['heading','paragraph']}),Highlight.configure({multicolor:true}),Subscript,Superscript,SafeCodeBlock.configure({lowlight:createLowlight(common)})], content:'',editorProps:{attributes:{'aria-label':'笔记正文',role:'textbox','aria-multiline':'true'},...editorProps,transformPastedHTML:html=>sanitizeHTML(html,noteID)}, onUpdate});
   // Parse into inert schema data before mounting any nodes; no raw HTML enters the live editor.
   const parse = text => cleanJSON(editor.markdown.parse(text),noteID);
-  editor.loadMarkdown = text => editor.chain().setContent(parse(text),{emitUpdate:false}).setMeta('addToHistory',false).run();
-  editor.loadMarkdown(markdown);
+  editor.loadMarkdown = text => editor.chain().setContent(parse(text),{emitUpdate:false}).command(({tr})=>{tr.step(new MarkdownSourceStep(null,text));return true;}).setMeta('addToHistory',false).run();
+  editor.applyMarkdown = text => {
+    if(!editor.isEditable || editor.view.composing)return false;
+    const previous=editor.getMarkdown();
+    editor.chain().command(({tr})=>{closeHistory(tr);return true;}).setContent(parse(text),{emitUpdate:false})
+      .command(({tr})=>{tr.step(new MarkdownSourceStep(previous,text));return true;}).run();
+    editor.view.dispatch(closeHistory(editor.state.tr));return true;
+  };
+  editor.appendMarkdown = text => {
+    if(!editor.isEditable || editor.view.composing || !text.trim())return false;
+    const content=editor.schema.nodeFromJSON(parse(text)).content;
+    editor.view.dispatch(closeHistory(editor.state.tr).insert(editor.state.doc.content.size,content));
+    editor.view.dispatch(closeHistory(editor.state.tr));return true;
+  };
   editor.getMarkdown = () => {
+    const source=sourceKey.getState(editor.state);if(typeof source==='string')return source;
     const serializer = DOMSerializer.fromSchema(editor.schema);
     const result = [];
     editor.state.doc.forEach(node => {
@@ -131,6 +147,7 @@ export function createEditor({markdown = '', noteID, element, onUpdate = () => {
     });
     return result.join('\n\n');
   };
+  editor.loadMarkdown(markdown);
   return editor;
 }
 export class SessionState {

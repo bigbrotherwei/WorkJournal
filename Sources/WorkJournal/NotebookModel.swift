@@ -2,6 +2,8 @@ import AppKit
 import SwiftUI
 import JournalCore
 
+enum NotebookSaveState { case idle, saving, saved, failed }
+
 @MainActor final class NotebookModel: ObservableObject {
     @Published private(set) var folders: [NoteFolder] = []
     @Published private(set) var notes: [NoteDocument] = []
@@ -16,12 +18,15 @@ import JournalCore
     @Published var lastImportIssues: [NotebookImportIssue] = []
     @Published var title = ""
     @Published private(set) var saveStatus = "所有笔记仅保存在这台 Mac"
+    @Published private(set) var saveState: NotebookSaveState = .idle
     @Published var error: String?
     @Published var notice: String?
     @Published private(set) var transitioning = false
     @Published private(set) var recoveryDrafts: [NotebookDraftEnvelope] = []
     @Published var openedAsset: NoteAsset?
     @Published private(set) var selectedAssets: [NoteAsset] = []
+    @Published var historyNote: NoteDocument?
+    var onCreateTask: ((String, UUID, String) -> Bool)?
     let editor = NoteEditorController()
     private var store: JournalStore?
     private var worker: NotebookDatabaseWorker?
@@ -110,10 +115,10 @@ import JournalCore
     private func load(_ id: UUID?) {
         saveTask?.cancel(); current = notes.first { $0.id == id }; selectedID = current?.id; title = current?.title ?? ""; dirty = false
         selectedAssets = current.flatMap { try? database().noteAssets(noteID: $0.id) } ?? []
-        guard let current else { gate = nil; saveStatus = "选择一篇笔记开始阅读或编辑"; return }
+        guard let current else { gate = nil; saveState = .idle; saveStatus = "选择一篇笔记开始阅读或编辑"; return }
         editor.load(noteID: current.id, markdown: current.markdown, revision: current.revision, force: true)
         gate = NotebookEditGate(noteID: current.id, sessionID: editor.sessionID)
-        saveStatus = "已保存到本机"
+        saveState = .saved; saveStatus = "已保存到本机"
     }
     func changeTitle(_ value: String) {
         guard current != nil else { return }; title = value; current?.title = value; changed()
@@ -126,12 +131,12 @@ import JournalCore
         current?.markdown = update.markdown; changed()
     }
     private func changed() {
-        dirty = true; saveStatus = "正在保存…"
-        do { try journal() } catch { self.error = "草稿暂存失败，请保留窗口并复制内容：" + error.localizedDescription; saveStatus = "保存失败"; return }
+        dirty = true; saveState = .saving; saveStatus = "正在保存…"
+        do { try journal() } catch { self.error = "草稿暂存失败，请保留窗口并复制内容：" + error.localizedDescription; saveState = .failed; saveStatus = "保存失败"; return }
         saveTask?.cancel()
         saveTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(650)); try self?.saveCurrent() }
-            catch is CancellationError {} catch { self?.saveStatus = "保存失败 · 草稿已保留"; self?.error = error.localizedDescription }
+            catch is CancellationError {} catch { self?.saveState = .failed; self?.saveStatus = "保存失败 · 草稿已保留"; self?.error = error.localizedDescription }
         }
     }
     private func journal() throws {
@@ -144,15 +149,66 @@ import JournalCore
         let saved = try database().saveNote(value, expectedRevision: value.revision)
         current = saved; title = saved.title; dirty = false
         try draftStore?.remove(noteID: saved.id)
-        try reload(); saveStatus = "已保存到本机 · " + saved.updatedAt.formatted(date: .omitted, time: .shortened)
+        // The transaction changed only this note. Keep the existing library and bounded
+        // excerpts instead of reading and re-rendering every body after each autosave.
+        var updatedNotes = notes.filter { $0.id != saved.id }
+        let insertion = updatedNotes.firstIndex {
+            $0.updatedAt < saved.updatedAt || ($0.updatedAt == saved.updatedAt && $0.id.uuidString > saved.id.uuidString)
+        } ?? updatedNotes.endIndex
+        updatedNotes.insert(saved, at: insertion)
+        listPreviews[saved.id] = NotebookListPreview.text(saved.markdown)
+        notes = updatedNotes
+        saveState = .saved; saveStatus = "已保存到本机 · " + saved.updatedAt.formatted(date: .omitted, time: .shortened)
     }
     func flush() async throws {
-        saveTask?.cancel()
-        if editorVisible, current != nil {
-            let update = try await editor.flush(); receive(update)
+        do {
+            saveTask?.cancel()
+            if editorVisible, current != nil {
+                let update = try await editor.flush(); receive(update)
+            }
+            saveTask?.cancel(); try saveCurrent()
+        } catch {
+            saveState = .failed; saveStatus = "保存失败，请保留窗口重试"
+            throw error
         }
-        saveTask?.cancel(); try saveCurrent()
     }
+    func openNote(id: UUID, find text: String? = nil) async throws {
+        try await flush()
+        guard notes.contains(where: { $0.id == id }) else { throw JournalError.invalid("来源笔记已移入回收站或已删除。") }
+        load(id)
+        if let text, !text.isEmpty { editor.find(text: text) }
+    }
+    func insertTemplate(_ markdown: String) {
+        perform { try await self.editor.insertMarkdown(markdown); try await self.flush() }
+    }
+    func createTaskFromSelection() {
+        perform {
+            guard let id = self.current?.id else { return }
+            let selection = try await self.editor.selectedText().trimmingCharacters(in: .whitespacesAndNewlines)
+            try await self.flush()
+            guard let note = self.current, note.id == id else { throw NoteEditorError.changedSession }
+            let summary = NotebookListPreview.text(note.markdown)
+            let content = selection.isEmpty ? (summary.isEmpty ? note.title : summary) : selection
+            if self.onCreateTask?(content, note.id, note.title) == true {
+                self.notice = selection.isEmpty ? "已用笔记摘要创建待办" : "已用选中文字创建待办"
+            }
+        }
+    }
+    func showHistory() { perform { try await self.flush(); self.historyNote = self.current } }
+    func noteHistory() throws -> [NoteVersion] {
+        guard let id = historyNote?.id else { return [] }; return try database().noteHistory(noteID: id)
+    }
+    func checkpointHistory() throws {
+        guard let id = historyNote?.id else { return }; _ = try database().checkpointNote(id: id)
+    }
+    func restoreHistory(versionID: UUID, expectedRevision: Int) throws -> NoteDocument {
+        guard let id = historyNote?.id else { throw NoteEditorError.changedSession }
+        return try database().restoreNoteVersion(noteID: id, versionID: versionID, expectedRevision: expectedRevision)
+    }
+    func didRestoreHistory(_ note: NoteDocument) {
+        do { try reload(); load(note.id); historyNote = nil; notice = "已恢复历史版本，恢复前的正文也已保留" } catch { self.error = error.localizedDescription }
+    }
+    func checkpointCurrentNote() { perform { try await self.flush(); if let id = self.current?.id { _ = try self.database().checkpointNote(id: id); self.notice = "已保存手动快照" } } }
     func createNote() {
         perform {
             try await self.flush()

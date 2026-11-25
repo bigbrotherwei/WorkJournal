@@ -47,7 +47,7 @@ import JournalCore
     @objc func showMain() {
         if mainWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-            window.title = "工作随记"; window.isReleasedWhenClosed = false
+            window.title = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "工作随记"; window.isReleasedWhenClosed = false
             window.minSize = NSSize(width: 900, height: 640); window.titlebarAppearsTransparent = true
             window.contentView = NSHostingView(rootView: MainView(app: model, capture: { [weak self] in self?.showCapture() }))
             window.center(); mainWindow = window

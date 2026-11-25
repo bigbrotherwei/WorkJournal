@@ -22,12 +22,14 @@ public struct Entry: Identifiable, Codable, Equatable, Sendable {
     public var snoozedUntil: Date?
     public var nextOccurrenceID: UUID?
     public var deletedAt: Date?
+    public var sourceNoteID: UUID?
+    public var sourceNoteTitle: String?
     public var images: [ImageAttachment] = []
     public var plainText: String { RecordContent.plainText(text) }
     public var hasContent: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty }
     private enum CodingKeys: String, CodingKey {
         case id, text, day, createdAt, updatedAt, inReport, status, category, manualCategory, images, dueAt, reminderEnabled, deletedAt
-        case recurrence, recurrenceDayOfMonth, recurrenceClock, recurrenceSeriesID, snoozedUntil, nextOccurrenceID
+        case recurrence, recurrenceDayOfMonth, recurrenceClock, recurrenceSeriesID, snoozedUntil, nextOccurrenceID, sourceNoteID, sourceNoteTitle
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -44,6 +46,8 @@ public struct Entry: Identifiable, Codable, Equatable, Sendable {
         recurrenceSeriesID = try c.decodeIfPresent(UUID.self, forKey: .recurrenceSeriesID)
         snoozedUntil = try c.decodeIfPresent(Date.self, forKey: .snoozedUntil)
         nextOccurrenceID = try c.decodeIfPresent(UUID.self, forKey: .nextOccurrenceID)
+        sourceNoteID = try c.decodeIfPresent(UUID.self, forKey: .sourceNoteID)
+        sourceNoteTitle = try c.decodeIfPresent(String.self, forKey: .sourceNoteTitle)
         deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
         images = try c.decodeIfPresent([ImageAttachment].self, forKey: .images) ?? []
     }
@@ -55,8 +59,9 @@ public struct Report: Identifiable, Codable, Equatable, Sendable {
     public var text: String
     public var createdAt = Date()
     public var sourceFingerprint: String?
-    public init(day: String, text: String, sourceFingerprint: String? = nil) {
-        self.day = day; self.text = text; self.sourceFingerprint = sourceFingerprint
+    public var provenance: ReportProvenance?
+    public init(day: String, text: String, sourceFingerprint: String? = nil, provenance: ReportProvenance? = nil) {
+        self.day = day; self.text = text; self.sourceFingerprint = sourceFingerprint; self.provenance = provenance
     }
 }
 public enum JournalError: LocalizedError {
